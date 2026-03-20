@@ -34,11 +34,11 @@ class CausalVAE(nn.Module):
             
         nn = getattr(nns, nn)
         self.enc = nn.Encoder(self.z_dim, self.channel)
-        self.dec = nn.Decoder_DAG(self.z_dim, self.z1_dim, self.z2_dim)
+        self.dec = nn.Decoder_DAG(self.z_dim, self.z1_dim, self.z2_dim, channel=self.channel)
         self.dag = nn.DagLayer(self.z1_dim, self.z1_dim, i=inference, initial=initial)
         self.attn = nn.Attention(self.z2_dim)
-        self.mask_z = nn.MaskLayer(self.z_dim, z2_dim=self.z2_dim)
-        self.mask_u = nn.MaskLayer(self.z1_dim, z2_dim=1)
+        self.mask_z = nn.MaskLayer(self.z_dim, concept=self.z1_dim, z2_dim=self.z2_dim)
+        self.mask_u = nn.MaskLayer(self.z1_dim, concept=self.z1_dim, z2_dim=1)
 
 
 

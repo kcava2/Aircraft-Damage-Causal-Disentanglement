@@ -120,6 +120,20 @@ def get_covariance_matrix(A):
 	return I
 
 
+def _h_A(A, m):
+	"""Acyclicity constraint from NOTEARS: h(A) = trace(expm(A⊙A)) - m"""
+	assert A.dim() == 2 or A.dim() == 3, "A must be 2D or batch of 2D matrices"
+	if A.dim() == 3:
+		# batch of adjacency matrices
+		A_squared = A * A
+		exp_A = torch.matrix_exp(A_squared)
+		return torch.trace(exp_A).sum() - m
+	else:
+		A_squared = A * A
+		exp_A = torch.matrix_exp(A_squared)
+		return torch.trace(exp_A) - m
+
+
 def sample_gaussian(m, v):
 	"""
 	Element-wise application reparameterization trick to sample from Gaussian

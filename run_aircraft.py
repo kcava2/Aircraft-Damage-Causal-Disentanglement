@@ -12,7 +12,7 @@ from torchvision.utils import save_image
 # ── Original repo imports ────────────────────────────────────────────────────
 from codebase import utils as ut
 from codebase.models.mask_vae_aircraft import CausalVAE
-from utils import _h_A
+from codebase.utils import _h_A
 
 # ── Our new file imports ─────────────────────────────────────────────────────
 from dataset.aircraft_damage import (

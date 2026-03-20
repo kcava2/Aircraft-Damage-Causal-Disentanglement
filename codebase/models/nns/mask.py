@@ -78,6 +78,11 @@ class MaskLayer(nn.Module):
 			nn.ELU(),
 			nn.Linear(32, z2_dim)
 		)
+		self.net5 = nn.Sequential(
+			nn.Linear(z2_dim , 32),
+			nn.ELU(),
+			nn.Linear(32, z2_dim)
+		)
 		self.net = nn.Sequential(
 			nn.Linear(z2_dim , 32),
 			nn.ELU(),
@@ -97,23 +102,31 @@ class MaskLayer(nn.Module):
 		zy = z.view(-1, self.concept*self.z2_dim)
 		if self.z2_dim == 1:
 			zy = zy.reshape(zy.size()[0],zy.size()[1],1)
-			if self.concept ==4:
+			if self.concept ==5:
+				zy1, zy2, zy3, zy4, zy5 = zy[:,0], zy[:,1], zy[:,2], zy[:,3], zy[:,4]
+			elif self.concept ==4:
 				zy1, zy2, zy3, zy4= zy[:,0],zy[:,1],zy[:,2],zy[:,3]
 			elif self.concept ==3:
 				zy1, zy2, zy3= zy[:,0],zy[:,1],zy[:,2]
 		else:
-			if self.concept ==4:
-				zy1, zy2, zy3, zy4 = torch.split(zy, self.z_dim//self.concept, dim = 1)
-			elif self.concept ==3:
-				zy1, zy2, zy3= torch.split(zy, self.z_dim//self.concept, dim = 1)
+			if self.concept == 5:
+				zy1, zy2, zy3, zy4, zy5 = torch.split(zy, self.z_dim // self.concept, dim=1)
+			elif self.concept == 4:
+				zy1, zy2, zy3, zy4 = torch.split(zy, self.z_dim // self.concept, dim=1)
+			elif self.concept == 3:
+				zy1, zy2, zy3 = torch.split(zy, self.z_dim // self.concept, dim=1)
 		rx1 = self.net1(zy1)
 		rx2 = self.net2(zy2)
 		rx3 = self.net3(zy3)
-		if self.concept ==4:
+		if self.concept == 5:
 			rx4 = self.net4(zy4)
-			h = torch.cat((rx1,rx2,rx3,rx4), dim=1)
-		elif self.concept ==3:
-			h = torch.cat((rx1,rx2,rx3), dim=1)
+			rx5 = self.net5(zy5)
+			h = torch.cat((rx1, rx2, rx3, rx4, rx5), dim=1)
+		elif self.concept == 4:
+			rx4 = self.net4(zy4)
+			h = torch.cat((rx1, rx2, rx3, rx4), dim=1)
+		elif self.concept == 3:
+			h = torch.cat((rx1, rx2, rx3), dim=1)
 		#print(h.size())
 		return h
 
@@ -447,13 +460,13 @@ class Encoder(nn.Module):
 		self.z_dim = z_dim
 		self.y_dim = y_dim
 		self.channel = channel
-		self.fc1 = nn.Linear(self.channel*96*96, 300)
+		self.fc1 = nn.Linear(self.channel*64*64, 300)
 		self.fc2 = nn.Linear(300+y_dim, 300)
 		self.fc3 = nn.Linear(300, 300)
 		self.fc4 = nn.Linear(300, 2 * z_dim)
 		self.LReLU = nn.LeakyReLU(0.2, inplace=True)
 		self.net = nn.Sequential(
-			nn.Linear(self.channel*96*96, 900),
+			nn.Linear(self.channel*64*64, 900),
 			nn.ELU(),
 			nn.Linear(900, 300),
 			nn.ELU(),
@@ -461,7 +474,7 @@ class Encoder(nn.Module):
 		)
 
 	def conditional_encode(self, x, l):
-		x = x.view(-1, self.channel*96*96)
+		x = x.view(-1, self.channel*64*64)
 		x = F.elu(self.fc1(x))
 		l = l.view(-1, 4)
 		x = F.elu(self.fc2(torch.cat([x, l], dim=1)))
@@ -472,7 +485,7 @@ class Encoder(nn.Module):
 
 	def encode(self, x, y=None):
 		xy = x if y is None else torch.cat((x, y), dim=1)
-		xy = xy.view(-1, self.channel*96*96)
+		xy = xy.view(-1, self.channel*64*64)
 		h = self.net(xy)
 		m, v = ut.gaussian_parameters(h, dim=1)
 		#print(self.z_dim,m.size(),v.size())
@@ -496,7 +509,7 @@ class Decoder_DAG(nn.Module):
 			nn.ELU(),
 			nn.Linear(300, 1024),
 			nn.ELU(),
-			nn.Linear(1024, self.channel*96*96)
+			nn.Linear(1024, self.channel*64*64)
 		)
 		self.net2 = nn.Sequential(
 			nn.Linear(z1_dim + y_dim, 300),
@@ -505,7 +518,7 @@ class Decoder_DAG(nn.Module):
 			nn.ELU(),
 			nn.Linear(300, 1024),
 			nn.ELU(),
-			nn.Linear(1024, self.channel*96*96)
+			nn.Linear(1024, self.channel*64*64)
 		)
 		self.net3 = nn.Sequential(
 			nn.Linear(z1_dim + y_dim, 300),
@@ -514,7 +527,7 @@ class Decoder_DAG(nn.Module):
 			nn.ELU(),
 			nn.Linear(300, 1024),
 			nn.ELU(),
-			nn.Linear(1024, self.channel*96*96)
+			nn.Linear(1024, self.channel*64*64)
 		)
 		self.net4 = nn.Sequential(
 			nn.Linear(z1_dim + y_dim, 300),
@@ -523,11 +536,16 @@ class Decoder_DAG(nn.Module):
 			nn.ELU(),
 			nn.Linear(300, 1024),
 			nn.ELU(),
-			nn.Linear(1024, self.channel*96*96)
+			nn.Linear(1024, self.channel*64*64)
 		)
 		self.net5 = nn.Sequential(
+			nn.Linear(z1_dim + y_dim, 300),
 			nn.ELU(),
-			nn.Linear(1024, self.channel*96*96)
+			nn.Linear(300, 300),
+			nn.ELU(),
+			nn.Linear(300, 1024),
+			nn.ELU(),
+			nn.Linear(1024, self.channel*64*64)
 		)
    
 		self.net6 = nn.Sequential(
@@ -567,14 +585,25 @@ class Decoder_DAG(nn.Module):
 		zy = z if y is None else torch.cat((z, y), dim=1)
 		if self.z1_dim == 1:
 			zy = zy.reshape(zy.size()[0],zy.size()[1],1)
-			zy1, zy2, zy3, zy4 = zy[:,0],zy[:,1],zy[:,2],zy[:,3]
+			if self.concept == 5:
+				zy1, zy2, zy3, zy4, zy5 = zy[:,0], zy[:,1], zy[:,2], zy[:,3], zy[:,4]
+			else:
+				zy1, zy2, zy3, zy4 = zy[:,0],zy[:,1],zy[:,2],zy[:,3]
 		else:
-			zy1, zy2, zy3, zy4 = torch.split(zy, self.z_dim//self.concept, dim = 1)
+			if self.concept == 5:
+				zy1, zy2, zy3, zy4, zy5 = torch.split(zy, self.z_dim//self.concept, dim = 1)
+			else:
+				zy1, zy2, zy3, zy4 = torch.split(zy, self.z_dim//self.concept, dim = 1)
 		rx1 = self.net1(zy1)
 		rx2 = self.net2(zy2)
 		rx3 = self.net3(zy3)
-		rx4 = self.net4(zy4)
-		h = self.net5((rx1+rx2+rx3+rx4)/4)
+		if self.concept == 5:
+			rx4 = self.net4(zy4)
+			rx5 = self.net5(zy5)
+			h = self.net5((rx1+rx2+rx3+rx4+rx5)/5)
+		else:
+			rx4 = self.net4(zy4)
+			h = self.net5((rx1+rx2+rx3+rx4)/4)
 		return h,h,h,h,h
    
 	def decode(self, z, u , y = None):
@@ -588,19 +617,27 @@ class Decoder_DAG(nn.Module):
 			
 		if self.z1_dim == 1:
 			zy = zy.reshape(zy.size()[0],zy.size()[1],1)
-			if self.concept ==4:
+			if self.concept ==5:
+				zy1, zy2, zy3, zy4, zy5 = zy[:,0], zy[:,1], zy[:,2], zy[:,3], zy[:,4]
+			elif self.concept ==4:
 				zy1, zy2, zy3, zy4= zy[:,0],zy[:,1],zy[:,2],zy[:,3]
 			elif self.concept ==3:
 				zy1, zy2, zy3= zy[:,0],zy[:,1],zy[:,2]
 		else:
-			if self.concept ==4:
+			if self.concept ==5:
+				zy1, zy2, zy3, zy4, zy5 = torch.split(zy, self.z_dim//self.concept, dim = 1)
+			elif self.concept ==4:
 				zy1, zy2, zy3, zy4 = torch.split(zy, self.z_dim//self.concept, dim = 1)
 			elif self.concept ==3:
 				zy1, zy2, zy3= torch.split(zy, self.z_dim//self.concept, dim = 1)
 		rx1 = self.net1(zy1)
 		rx2 = self.net2(zy2)
 		rx3 = self.net3(zy3)
-		if self.concept ==4:
+		if self.concept ==5:
+			rx4 = self.net4(zy4)
+			rx5 = self.net5(zy5)
+			h = (rx1 + rx2 + rx3 + rx4 + rx5) / self.concept
+		elif self.concept ==4:
 			rx4 = self.net4(zy4)
 			h = (rx1+rx2+rx3+rx4)/self.concept
 		elif self.concept ==3:

@@ -3,8 +3,8 @@ import torch
 from codebase.models.mask_vae_aircraft import CausalVAE
 from dataset.aircraft_damage import SCALE, N_CONCEPTS, CLASS_NAMES, get_transforms, AircraftDamageDataset
 from dataset.aircraft_dag import get_dag_init
-from models.classifier_head import MultiLabelHead
-from utils import _h_A
+from codebase.models.classifier_head import MultiLabelHead
+from codebase.utils import _h_A
 
 print('All imports OK')
 print(f'N_CONCEPTS: {N_CONCEPTS}')
