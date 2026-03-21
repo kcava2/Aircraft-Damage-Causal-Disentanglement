@@ -89,8 +89,9 @@ class CausalVAE(nn.Module):
         
         decoded_bernoulli_logits,x1,x2,x3,x4 = self.dec.decode_sep(z_given_dag.reshape([z_given_dag.size()[0], self.z_dim]), label.to(device))
         
-        rec = ut.log_bernoulli_with_logits(x, decoded_bernoulli_logits.reshape(x.size()))
-        rec = -torch.mean(rec)
+        recon_img = torch.sigmoid(decoded_bernoulli_logits.reshape(x.size()))
+        rec = F.mse_loss(recon_img, x)
+        rec = torch.mean(rec)
 
         p_m, p_v = torch.zeros(q_m.size()), torch.ones(q_m.size())
         cp_m, cp_v = ut.condition_prior(self.scale, label, self.z2_dim)

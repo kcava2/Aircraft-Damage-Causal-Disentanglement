@@ -320,10 +320,12 @@ class DagLayer(nn.Linear):
         return x
       
 class ConvEncoder(nn.Module):
-	def __init__(self, out_dim=None):
+	def __init__(self, z_dim, channel):
 		super().__init__()
+		self.z_dim = z_dim
+		self.channel = channel
 		# init 96*96
-		self.conv1 = torch.nn.Conv2d(3, 32, 4, 2, 1) # 48*48
+		self.conv1 = torch.nn.Conv2d(channel, 32, 4, 2, 1) # 48*48
 		self.conv2 = torch.nn.Conv2d(32, 64, 4, 2, 1, bias=False) # 24*24
 		self.conv3 = torch.nn.Conv2d(64, 1, 4, 2, 1, bias=False)
 		#self.conv4 = torch.nn.Conv2d(128, 1, 1, 1, 0) # 54*44
@@ -332,10 +334,10 @@ class ConvEncoder(nn.Module):
 		self.convm = torch.nn.Conv2d(1, 1, 4, 2, 1)
 		self.convv = torch.nn.Conv2d(1, 1, 4, 2, 1)
 		self.mean_layer = nn.Sequential(
-			torch.nn.Linear(8*8, 16)
+			torch.nn.Linear(8*8, z_dim)
 			) # 12*12
 		self.var_layer = nn.Sequential(
-			torch.nn.Linear(8*8, 16)
+			torch.nn.Linear(8*8, z_dim)
 			)
 		# self.fc1 = torch.nn.Linear(6*6*128, 512)
 		self.conv6 = nn.Sequential(
@@ -376,11 +378,13 @@ class ConvEncoder(nn.Module):
 		#print(m.size())
 		return m,v
 class ConvDecoder(nn.Module):
-	def __init__(self, out_dim = None):
+	def __init__(self, z_dim, channel):
 		super().__init__()
+		self.z_dim = z_dim
+		self.channel = channel
    
 		self.net6 = nn.Sequential(
-				nn.Conv2d(16, 128, 1),
+				nn.Conv2d(z_dim, 128, 1),
 				nn.LeakyReLU(0.2),
 				nn.ConvTranspose2d(128, 64, 4),
 				nn.LeakyReLU(0.2),
@@ -392,16 +396,15 @@ class ConvDecoder(nn.Module):
 				nn.LeakyReLU(0.2),
 				nn.ConvTranspose2d(32, 32, 4, 2, 1),
 				nn.LeakyReLU(0.2),
-				nn.ConvTranspose2d(32, 3, 4, 2, 1)
+				nn.ConvTranspose2d(32, channel, 4, 2, 1)
 		)
    
 	def decode_sep(self,x):
-		return None
-   
-	def decode(self, z):
-		z = z.view(-1, 16, 1, 1)
-		z = self.net6(z)
-		return z
+		x = x.view(-1, self.z_dim, 1, 1)
+		return self.net6(x).view(x.size(0), -1), None, None, None, None
+
+class Decoder_DAG(ConvDecoder):
+    pass
 
 class ConvDec(nn.Module):
   def __init__(self, out_dim = None):
