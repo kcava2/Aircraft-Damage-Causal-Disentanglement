@@ -327,17 +327,16 @@ class ConvEncoder(nn.Module):
 		# init 96*96
 		self.conv1 = torch.nn.Conv2d(channel, 32, 4, 2, 1) # 48*48
 		self.conv2 = torch.nn.Conv2d(32, 64, 4, 2, 1, bias=False) # 24*24
-		self.conv3 = torch.nn.Conv2d(64, 1, 4, 2, 1, bias=False)
-		#self.conv4 = torch.nn.Conv2d(128, 1, 1, 1, 0) # 54*44
+		self.conv3 = torch.nn.Conv2d(64, 1, 4, 2, 1, bias=False) # 12*12
    
 		self.LReLU = torch.nn.LeakyReLU(0.2, inplace=True)
-		self.convm = torch.nn.Conv2d(1, 1, 4, 2, 1)
-		self.convv = torch.nn.Conv2d(1, 1, 4, 2, 1)
+		self.convm = torch.nn.Conv2d(1, 1, 4, 2, 1) # 6*6
+		self.convv = torch.nn.Conv2d(1, 1, 4, 2, 1) # 6*6
 		self.mean_layer = nn.Sequential(
-			torch.nn.Linear(8*8, z_dim)
-			) # 12*12
+			torch.nn.Linear(6*6, z_dim)
+			)
 		self.var_layer = nn.Sequential(
-			torch.nn.Linear(8*8, z_dim)
+			torch.nn.Linear(6*6, z_dim)
 			)
 		# self.fc1 = torch.nn.Linear(6*6*128, 512)
 		self.conv6 = nn.Sequential(
@@ -364,9 +363,9 @@ class ConvEncoder(nn.Module):
 		#print(x.size())
 		hm = self.convm(x)
 		#print(hm.size())
-		hm = hm.view(-1, 8*8)
+		hm = hm.view(-1, 6*6)
 		hv = self.convv(x)
-		hv = hv.view(-1, 8*8)
+		hv = hv.view(-1, 6*6)
 		mu, var = self.mean_layer(hm), self.var_layer(hv)
 		var = F.softplus(var) + 1e-8
 		#var = torch.reshape(var, [-1, 16, 16])
@@ -457,225 +456,261 @@ class ConvDec(nn.Module):
     
     return z
 
-class Encoder(nn.Module):
-	def __init__(self, z_dim, channel=4, y_dim=4):
-		super().__init__()
-		self.z_dim = z_dim
-		self.y_dim = y_dim
-		self.channel = channel
-		self.fc1 = nn.Linear(self.channel*64*64, 300)
-		self.fc2 = nn.Linear(300+y_dim, 300)
-		self.fc3 = nn.Linear(300, 300)
-		self.fc4 = nn.Linear(300, 2 * z_dim)
-		self.LReLU = nn.LeakyReLU(0.2, inplace=True)
-		self.net = nn.Sequential(
-			nn.Linear(self.channel*64*64, 900),
-			nn.ELU(),
-			nn.Linear(900, 300),
-			nn.ELU(),
-			nn.Linear(300, 2 * z_dim),
-		)
-
-	def conditional_encode(self, x, l):
-		x = x.view(-1, self.channel*64*64)
-		x = F.elu(self.fc1(x))
-		l = l.view(-1, 4)
-		x = F.elu(self.fc2(torch.cat([x, l], dim=1)))
-		x = F.elu(self.fc3(x))
-		x = self.fc4(x)
-		m, v = ut.gaussian_parameters(x, dim=1)
-		return m,v
-
-	def encode(self, x, y=None):
-		xy = x if y is None else torch.cat((x, y), dim=1)
-		xy = xy.view(-1, self.channel*64*64)
-		h = self.net(xy)
-		m, v = ut.gaussian_parameters(h, dim=1)
-		#print(self.z_dim,m.size(),v.size())
-		return m, v
+class Encoder(ConvEncoder):
+	def __init__(self, z_dim, channel=3, y_dim=4):
+		super().__init__(z_dim, channel)
    
    
 class Decoder_DAG(nn.Module):
-	def __init__(self, z_dim, concept, z1_dim, channel = 4, y_dim=0):
+	def __init__(self, z_dim, concept, z1_dim, channel=3, y_dim=0):
 		super().__init__()
 		self.z_dim = z_dim
 		self.z1_dim = z1_dim
 		self.concept = concept
 		self.y_dim = y_dim
 		self.channel = channel
-		#print(self.channel)
-		self.elu = nn.ELU()
+		# Convolutional decoders for each concept
 		self.net1 = nn.Sequential(
-			nn.Linear(z1_dim + y_dim, 300),
-			nn.ELU(),
-			nn.Linear(300, 300),
-			nn.ELU(),
-			nn.Linear(300, 1024),
-			nn.ELU(),
-			nn.Linear(1024, self.channel*64*64)
+			nn.Conv2d(z1_dim, 128, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(128, 64, 4),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(64, 64, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(64, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, channel, 4, 2, 1)
 		)
 		self.net2 = nn.Sequential(
-			nn.Linear(z1_dim + y_dim, 300),
-			nn.ELU(),
-			nn.Linear(300, 300),
-			nn.ELU(),
-			nn.Linear(300, 1024),
-			nn.ELU(),
-			nn.Linear(1024, self.channel*64*64)
+			nn.Conv2d(z1_dim, 128, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(128, 64, 4),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(64, 64, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(64, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, channel, 4, 2, 1)
 		)
 		self.net3 = nn.Sequential(
-			nn.Linear(z1_dim + y_dim, 300),
-			nn.ELU(),
-			nn.Linear(300, 300),
-			nn.ELU(),
-			nn.Linear(300, 1024),
-			nn.ELU(),
-			nn.Linear(1024, self.channel*64*64)
+			nn.Conv2d(z1_dim, 128, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(128, 64, 4),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(64, 64, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(64, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, channel, 4, 2, 1)
 		)
 		self.net4 = nn.Sequential(
-			nn.Linear(z1_dim + y_dim, 300),
-			nn.ELU(),
-			nn.Linear(300, 300),
-			nn.ELU(),
-			nn.Linear(300, 1024),
-			nn.ELU(),
-			nn.Linear(1024, self.channel*64*64)
+			nn.Conv2d(z1_dim, 128, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(128, 64, 4),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(64, 64, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(64, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, channel, 4, 2, 1)
 		)
 		self.net5 = nn.Sequential(
-			nn.Linear(z1_dim + y_dim, 300),
-			nn.ELU(),
-			nn.Linear(300, 300),
-			nn.ELU(),
-			nn.Linear(300, 1024),
-			nn.ELU(),
-			nn.Linear(1024, self.channel*64*64)
+			nn.Conv2d(z1_dim, 128, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(128, 64, 4),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(64, 64, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(64, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, channel, 4, 2, 1)
 		)
-   
+		# Full decoder for all z_dim
 		self.net6 = nn.Sequential(
-			nn.Linear(z_dim, 300),
-			nn.ELU(),
-			nn.Linear(300, 300),
-			nn.ELU(),
-			nn.Linear(300, 1024),
-			nn.ELU(),
-			nn.Linear(1024, 1024),
-			nn.ELU(),
-			nn.Linear(1024, self.channel*96*96)
+			nn.Conv2d(z_dim, 128, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(128, 64, 4),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(64, 64, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(64, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, channel, 4, 2, 1)
 		)
-	def decode_condition(self, z, u):
-		#z = z.view(-1,3*4)
-		z = z.view(-1, 3*4)
-		z1, z2, z3 = torch.split(z, self.z_dim//4, dim = 1)
-		#print(u[:,0].reshape(1,u.size()[0]).size())
-		rx1 = self.net1(torch.transpose(torch.cat((torch.transpose(z1, 1,0), u[:,0].reshape(1,u.size()[0])), dim = 0), 1, 0))
-		rx2 = self.net2(torch.transpose(torch.cat((torch.transpose(z2, 1,0), u[:,1].reshape(1,u.size()[0])), dim = 0), 1, 0))
-		rx3 = self.net3(torch.transpose(torch.cat((torch.transpose(z3, 1,0), u[:,2].reshape(1,u.size()[0])), dim = 0), 1, 0))
-   
-		h = self.net4( torch.cat((rx1,rx2, rx3), dim=1))
-		return h
 
-	def decode_mix(self, z):
-		z = z.permute(0,2,1)
-		z = torch.sum(z, dim = 2, out=None) 
-		#print(z.contiguous().size())
-		z = z.contiguous()
-		h = self.net1(z)
-		return h
-   
-	def decode_union(self, z, u, y=None):
-		
-		z = z.view(-1, self.concept*self.z1_dim)
-		zy = z if y is None else torch.cat((z, y), dim=1)
-		if self.z1_dim == 1:
-			zy = zy.reshape(zy.size()[0],zy.size()[1],1)
-			if self.concept == 5:
-				zy1, zy2, zy3, zy4, zy5 = zy[:,0], zy[:,1], zy[:,2], zy[:,3], zy[:,4]
-			else:
-				zy1, zy2, zy3, zy4 = zy[:,0],zy[:,1],zy[:,2],zy[:,3]
-		else:
-			if self.concept == 5:
-				zy1, zy2, zy3, zy4, zy5 = torch.split(zy, self.z_dim//self.concept, dim = 1)
-			else:
-				zy1, zy2, zy3, zy4 = torch.split(zy, self.z_dim//self.concept, dim = 1)
-		rx1 = self.net1(zy1)
-		rx2 = self.net2(zy2)
-		rx3 = self.net3(zy3)
-		if self.concept == 5:
-			rx4 = self.net4(zy4)
-			rx5 = self.net5(zy5)
-			h = self.net5((rx1+rx2+rx3+rx4+rx5)/5)
-		else:
-			rx4 = self.net4(zy4)
-			h = self.net5((rx1+rx2+rx3+rx4)/4)
-		return h,h,h,h,h
-   
-	def decode(self, z, u , y = None):
-		z = z.view(-1, self.concept*self.z1_dim)
-		h = self.net6(z)
-		return h, h,h,h,h
-    
+	def _reshape_to_conv(self, z, z1_dim):
+		"""Reshape latent vector to 4D tensor for conv layers."""
+		return z.view(-1, z1_dim, 1, 1)
+
+	def _decode_concept(self, z, decoder_net):
+		"""Decode a single concept using its decoder."""
+		z_reshaped = self._reshape_to_conv(z, self.z1_dim)
+		out = decoder_net(z_reshaped)
+		# Resize to target image size (96x96)
+		out = F.interpolate(out, size=(96, 96), mode='bilinear', align_corners=False)
+		return out
+
 	def decode_sep(self, z, u, y=None):
-		z = z.view(-1, self.concept*self.z1_dim)
+		"""Decode with concept separation."""
+		z = z.view(-1, self.concept * self.z1_dim)
 		zy = z if y is None else torch.cat((z, y), dim=1)
-			
-		if self.z1_dim == 1:
-			zy = zy.reshape(zy.size()[0],zy.size()[1],1)
-			if self.concept ==5:
-				zy1, zy2, zy3, zy4, zy5 = zy[:,0], zy[:,1], zy[:,2], zy[:,3], zy[:,4]
-			elif self.concept ==4:
-				zy1, zy2, zy3, zy4= zy[:,0],zy[:,1],zy[:,2],zy[:,3]
-			elif self.concept ==3:
-				zy1, zy2, zy3= zy[:,0],zy[:,1],zy[:,2]
-		else:
-			if self.concept ==5:
-				zy1, zy2, zy3, zy4, zy5 = torch.split(zy, self.z_dim//self.concept, dim = 1)
-			elif self.concept ==4:
-				zy1, zy2, zy3, zy4 = torch.split(zy, self.z_dim//self.concept, dim = 1)
-			elif self.concept ==3:
-				zy1, zy2, zy3= torch.split(zy, self.z_dim//self.concept, dim = 1)
-		rx1 = self.net1(zy1)
-		rx2 = self.net2(zy2)
-		rx3 = self.net3(zy3)
-		if self.concept ==5:
-			rx4 = self.net4(zy4)
-			rx5 = self.net5(zy5)
-			h = (rx1 + rx2 + rx3 + rx4 + rx5) / self.concept
-		elif self.concept ==4:
-			rx4 = self.net4(zy4)
-			h = (rx1+rx2+rx3+rx4)/self.concept
-		elif self.concept ==3:
-			h = (rx1+rx2+rx3)/self.concept
 		
-		return h,h,h,h,h
-   
-	def decode_cat(self, z, u, y=None):
-		z = z.view(-1, 4*4)
+		if self.z1_dim == 1:
+			zy = zy.reshape(zy.size()[0], zy.size()[1], 1)
+			if self.concept == 5:
+				zy1, zy2, zy3, zy4, zy5 = zy[:, 0], zy[:, 1], zy[:, 2], zy[:, 3], zy[:, 4]
+			elif self.concept == 4:
+				zy1, zy2, zy3, zy4 = zy[:, 0], zy[:, 1], zy[:, 2], zy[:, 3]
+			elif self.concept == 3:
+				zy1, zy2, zy3 = zy[:, 0], zy[:, 1], zy[:, 2]
+		else:
+			if self.concept == 5:
+				zy1, zy2, zy3, zy4, zy5 = torch.split(zy, self.z_dim // self.concept, dim=1)
+			elif self.concept == 4:
+				zy1, zy2, zy3, zy4 = torch.split(zy, self.z_dim // self.concept, dim=1)
+			elif self.concept == 3:
+				zy1, zy2, zy3 = torch.split(zy, self.z_dim // self.concept, dim=1)
+		
+		rx1 = self._decode_concept(zy1, self.net1)
+		rx2 = self._decode_concept(zy2, self.net2)
+		rx3 = self._decode_concept(zy3, self.net3)
+		
+		if self.concept == 5:
+			rx4 = self._decode_concept(zy4, self.net4)
+			rx5 = self._decode_concept(zy5, self.net5)
+			h = (rx1 + rx2 + rx3 + rx4 + rx5) / self.concept
+		elif self.concept == 4:
+			rx4 = self._decode_concept(zy4, self.net4)
+			h = (rx1 + rx2 + rx3 + rx4) / self.concept
+		elif self.concept == 3:
+			h = (rx1 + rx2 + rx3) / self.concept
+		
+		# Flatten output for compatibility with VAE loss computation
+		h = h.view(h.size(0), -1)
+		return h, h, h, h, h
+
+	def decode(self, z, u, y=None):
+		z = z.view(-1, self.concept * self.z1_dim)
+		z_reshaped = self._reshape_to_conv(z, self.z_dim)
+		h = self.net6(z_reshaped)
+		# Resize to target image size (96x96)
+		h = F.interpolate(h, size=(96, 96), mode='bilinear', align_corners=False)
+		h = h.view(h.size(0), -1)
+		return h, h, h, h, h
+
+	def decode_condition(self, z, u):
+		"""Decode with conditional information."""
+		z = z.view(-1, 3 * 4)
+		z1, z2, z3 = torch.split(z, self.z_dim // 4, dim=1)
+		rx1 = self._decode_concept(z1, self.net1)
+		rx2 = self._decode_concept(z2, self.net2)
+		rx3 = self._decode_concept(z3, self.net3)
+		h = (rx1 + rx2 + rx3) / 3
+		h = F.interpolate(h, size=(96, 96), mode='bilinear', align_corners=False)
+		return h.view(h.size(0), -1)
+
+	def decode_union(self, z, u, y=None):
+		"""Decode union of concepts."""
+		z = z.view(-1, self.concept * self.z1_dim)
 		zy = z if y is None else torch.cat((z, y), dim=1)
-		zy1, zy2, zy3, zy4 = torch.split(zy, 1, dim = 1)
-		rx1 = self.net1(zy1)
-		rx2 = self.net2(zy2)
-		rx3 = self.net3(zy3)
-		rx4 = self.net4(zy4)
-		h = self.net5( torch.cat((rx1,rx2, rx3, rx4), dim=1))
+		
+		if self.z1_dim == 1:
+			zy = zy.reshape(zy.size()[0], zy.size()[1], 1)
+			if self.concept == 5:
+				zy1, zy2, zy3, zy4, zy5 = zy[:, 0], zy[:, 1], zy[:, 2], zy[:, 3], zy[:, 4]
+			else:
+				zy1, zy2, zy3, zy4 = zy[:, 0], zy[:, 1], zy[:, 2], zy[:, 3]
+		else:
+			if self.concept == 5:
+				zy1, zy2, zy3, zy4, zy5 = torch.split(zy, self.z_dim // self.concept, dim=1)
+			else:
+				zy1, zy2, zy3, zy4 = torch.split(zy, self.z_dim // self.concept, dim=1)
+		
+		rx1 = self._decode_concept(zy1, self.net1)
+		rx2 = self._decode_concept(zy2, self.net2)
+		rx3 = self._decode_concept(zy3, self.net3)
+		
+		if self.concept == 5:
+			rx4 = self._decode_concept(zy4, self.net4)
+			rx5 = self._decode_concept(zy5, self.net5)
+			h = (rx1 + rx2 + rx3 + rx4 + rx5) / 5
+		else:
+			rx4 = self._decode_concept(zy4, self.net4)
+			h = (rx1 + rx2 + rx3 + rx4) / 4
+		
+		h = h.view(h.size(0), -1)
+		return h, h, h, h, h
+
+	def decode_cat(self, z, u, y=None):
+		"""Concatenate and decode."""
+		z = z.view(-1, 4 * 4)
+		zy = z if y is None else torch.cat((z, y), dim=1)
+		zy1, zy2, zy3, zy4 = torch.split(zy, 1, dim=1)
+		rx1 = self._decode_concept(zy1, self.net1)
+		rx2 = self._decode_concept(zy2, self.net2)
+		rx3 = self._decode_concept(zy3, self.net3)
+		rx4 = self._decode_concept(zy4, self.net4)
+		h = (rx1 + rx2 + rx3 + rx4) / 4
+		h = h.view(h.size(0), -1)
 		return h
    
    
 class Decoder(nn.Module):
-	def __init__(self, z_dim, y_dim=0):
+	def __init__(self, z_dim, y_dim=0, channel=4):
 		super().__init__()
 		self.z_dim = z_dim
 		self.y_dim = y_dim
+		self.channel = channel
+		# Linear layer to project to spatial dimensions
+		self.project = nn.Linear(z_dim + y_dim, 128 * 6 * 6)
+		# Deconvolutional layers to upsample to 96x96
 		self.net = nn.Sequential(
-			nn.Linear(z_dim + y_dim, 300),
-			nn.ELU(),
-			nn.Linear(300, 300),
-			nn.ELU(),
-			nn.Linear(300, 4*96*96)
+			nn.ConvTranspose2d(128, 64, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(64, 64, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(64, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, 32, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(32, 16, 4, 2, 1),
+			nn.LeakyReLU(0.2),
+			nn.ConvTranspose2d(16, channel, 4, 2, 1)
 		)
 
 	def decode(self, z, y=None):
 		zy = z if y is None else torch.cat((z, y), dim=1)
-		return self.net(zy)
+		# Project to spatial feature map
+		h = self.project(zy)
+		h = h.view(-1, 128, 6, 6)
+		# Upsample with deconv layers
+		h = self.net(h)
+		# Flatten output for compatibility
+		return h.view(h.size(0), -1)
 
 class Classifier(nn.Module):
 	def __init__(self, y_dim):

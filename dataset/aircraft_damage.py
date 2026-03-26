@@ -147,11 +147,10 @@ class AircraftDamageDataset(Dataset):
 # Default transforms
 # --------------------------------------------------------------------------- #
 
-def get_transforms(split: str = "train", img_size: int = 64):
+def get_transforms(split: str = "train", img_size: int = 96):
     """
     Returns torchvision transforms appropriate for each split.
-    CausalVAE uses 64x64 by default.  Increase img_size if you modify the
-    encoder/decoder architecture.
+    CausalVAE with convolutional encoder/decoder uses 96x96.
     """
     if split == "train":
         return transforms.Compose([

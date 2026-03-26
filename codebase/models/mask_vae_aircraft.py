@@ -12,12 +12,13 @@ from codebase import utils as ut
 from codebase.models import nns
 from torch import nn
 from torch.nn import functional as F
+import torchvision.models as models
 device = torch.device("cuda:0" if(torch.cuda.is_available()) else "cpu")
 
 
 
 class CausalVAE(nn.Module):
-    def __init__(self, nn='mask', name='vae', z_dim=20, z1_dim=5, z2_dim=4, channel=3, scale=None, inference=False, alpha=0.3, beta=1, initial=True):
+    def __init__(self, nn_type='mask', name='vae', z_dim=20, z1_dim=5, z2_dim=4, channel=3, scale=None, inference=False, alpha=0.3, beta=1, initial=True):
         super().__init__()
 
         self.name = name
@@ -32,13 +33,19 @@ class CausalVAE(nn.Module):
         else:
             self.scale = scale
             
-        nn = getattr(nns, nn)
-        self.enc = nn.Encoder(self.z_dim, self.channel)
-        self.dec = nn.Decoder_DAG(self.z_dim, self.z1_dim, self.z2_dim, channel=self.channel)
-        self.dag = nn.DagLayer(self.z1_dim, self.z1_dim, i=inference, initial=initial)
-        self.attn = nn.Attention(self.z2_dim)
-        self.mask_z = nn.MaskLayer(self.z_dim, concept=self.z1_dim, z2_dim=self.z2_dim)
-        self.mask_u = nn.MaskLayer(self.z1_dim, concept=self.z1_dim, z2_dim=1)
+        nn_module = getattr(nns, nn_type)
+        self.enc = nn_module.Encoder(self.z_dim, self.channel)
+        self.dec = nn_module.Decoder_DAG(self.z_dim, self.z1_dim, self.z2_dim, channel=self.channel)
+        self.dag = nn_module.DagLayer(self.z1_dim, self.z1_dim, i=inference, initial=initial)
+        self.attn = nn_module.Attention(self.z2_dim)
+        self.mask_z = nn_module.MaskLayer(self.z_dim, concept=self.z1_dim, z2_dim=self.z2_dim)
+        self.mask_u = nn_module.MaskLayer(self.z1_dim, concept=self.z1_dim, z2_dim=1)
+        
+        # Perceptual loss network (VGG16 features)
+        vgg16 = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1)
+        self.perceptual_net = nn.Sequential(*list(vgg16.features)[:16]).eval()  # Use first 16 layers (up to conv4_3)
+        for param in self.perceptual_net.parameters():
+            param.requires_grad = False
 
 
 
@@ -56,65 +63,75 @@ class CausalVAE(nn.Module):
         """
         assert label.size()[1] == self.z1_dim
 
-        q_m, q_v = self.enc.encode(x.to(device))
-        q_m, q_v = q_m.reshape([q_m.size()[0], self.z1_dim,self.z2_dim]),torch.ones(q_m.size()[0], self.z1_dim,self.z2_dim).to(device)
+        q_m, q_v = self.enc.encode(x.to(x.device))
+        q_m, q_v = q_m.reshape([q_m.size()[0], self.z1_dim,self.z2_dim]),torch.ones(q_m.size()[0], self.z1_dim,self.z2_dim).to(x.device)
 
-        decode_m, decode_v = self.dag.calculate_dag(q_m.to(device), torch.ones(q_m.size()[0], self.z1_dim,self.z2_dim).to(device))
+        decode_m, decode_v = self.dag.calculate_dag(q_m.to(x.device), torch.ones(q_m.size()[0], self.z1_dim,self.z2_dim).to(x.device))
         decode_m, decode_v = decode_m.reshape([q_m.size()[0], self.z1_dim,self.z2_dim]),decode_v
         if sample == False:
           if mask != None and mask < 2:
-              z_mask = torch.ones(q_m.size()[0], self.z1_dim,self.z2_dim).to(device)*adj
+              z_mask = torch.ones(q_m.size()[0], self.z1_dim,self.z2_dim).to(x.device)*adj
               decode_m[:, mask, :] = z_mask[:, mask, :]
               decode_v[:, mask, :] = z_mask[:, mask, :]
-          m_zm, m_zv = self.dag.mask_z(decode_m.to(device)).reshape([q_m.size()[0], self.z1_dim,self.z2_dim]),decode_v.reshape([q_m.size()[0], self.z1_dim,self.z2_dim])
-          m_u = self.dag.mask_u(label.to(device))
+          m_zm, m_zv = self.dag.mask_z(decode_m.to(x.device)).reshape([q_m.size()[0], self.z1_dim,self.z2_dim]),decode_v.reshape([q_m.size()[0], self.z1_dim,self.z2_dim])
+          m_u = self.dag.mask_u(label.to(x.device))
           
-          f_z = self.mask_z.mix(m_zm).reshape([q_m.size()[0], self.z1_dim,self.z2_dim]).to(device)
-          e_tilde = self.attn.attention(decode_m.reshape([q_m.size()[0], self.z1_dim,self.z2_dim]).to(device),q_m.reshape([q_m.size()[0], self.z1_dim,self.z2_dim]).to(device))[0]
+          f_z = self.mask_z.mix(m_zm).reshape([q_m.size()[0], self.z1_dim,self.z2_dim]).to(x.device)
+          e_tilde = self.attn.attention(decode_m.reshape([q_m.size()[0], self.z1_dim,self.z2_dim]).to(x.device),q_m.reshape([q_m.size()[0], self.z1_dim,self.z2_dim]).to(x.device))[0]
           if mask != None and mask < 2:
-              z_mask = torch.ones(q_m.size()[0],self.z1_dim,self.z2_dim).to(device)*adj
+              z_mask = torch.ones(q_m.size()[0],self.z1_dim,self.z2_dim).to(x.device)*adj
               e_tilde[:, mask, :] = z_mask[:, mask, :]
               
           f_z1 = f_z+e_tilde
           if mask!= None and mask == 2 :
-              z_mask = torch.ones(q_m.size()[0],self.z1_dim,self.z2_dim).to(device)*adj
+              z_mask = torch.ones(q_m.size()[0],self.z1_dim,self.z2_dim).to(x.device)*adj
               f_z1[:, mask, :] = z_mask[:, mask, :]
               m_zv[:, mask, :] = z_mask[:, mask, :]
           if mask!= None and mask == 3 :
-              z_mask = torch.ones(q_m.size()[0],self.z1_dim,self.z2_dim).to(device)*adj
+              z_mask = torch.ones(q_m.size()[0],self.z1_dim,self.z2_dim).to(x.device)*adj
               f_z1[:, mask, :] = z_mask[:, mask, :]
               m_zv[:, mask, :] = z_mask[:, mask, :]
-          g_u = self.mask_u.mix(m_u).to(device)
+          g_u = self.mask_u.mix(m_u).to(x.device)
           z_given_dag = ut.conditional_sample_gaussian(f_z1, m_zv*lambdav)
         
-        decoded_bernoulli_logits,x1,x2,x3,x4 = self.dec.decode_sep(z_given_dag.reshape([z_given_dag.size()[0], self.z_dim]), label.to(device))
-        
+        decoded_bernoulli_logits,x1,x2,x3,x4 = self.dec.decode_sep(z_given_dag.reshape([z_given_dag.size()[0], self.z_dim]), label.to(x.device))
+
         recon_img = torch.sigmoid(decoded_bernoulli_logits.reshape(x.size()))
-        rec = F.mse_loss(recon_img, x)
-        rec = torch.mean(rec)
+        x_01      = x * 0.5 + 0.5          # convert x from [-1,1] to [0,1]
+        mse_loss  = F.mse_loss(recon_img, x_01) * 10.0  # MSE reconstruction loss, scaled up for visibility
+        
+        # Perceptual loss using VGG16 features
+        with torch.no_grad():
+            x_features = self.perceptual_net(x_01.repeat(1, 3, 1, 1) if x_01.size(1) == 1 else x_01)
+            recon_features = self.perceptual_net(recon_img.repeat(1, 3, 1, 1) if recon_img.size(1) == 1 else recon_img)
+        perceptual_loss = F.mse_loss(x_features, recon_features) * 0.1  # Scale down perceptual loss
+        
+        rec = mse_loss + perceptual_loss  # Combine MSE and perceptual loss
 
-        p_m, p_v = torch.zeros(q_m.size()), torch.ones(q_m.size())
+        p_m, p_v = torch.zeros(q_m.size()).to(x.device), torch.ones(q_m.size()).to(x.device)
         cp_m, cp_v = ut.condition_prior(self.scale, label, self.z2_dim)
-        cp_v = torch.ones([q_m.size()[0],self.z1_dim,self.z2_dim]).to(device)
-        cp_z = ut.conditional_sample_gaussian(cp_m.to(device), cp_v.to(device))
-        kl = torch.zeros(1).to(device)
-        kl = alpha*ut.kl_normal(q_m.view(-1,self.z_dim).to(device), q_v.view(-1,self.z_dim).to(device), p_m.view(-1,self.z_dim).to(device), p_v.view(-1,self.z_dim).to(device))
+        cp_v = torch.ones([q_m.size()[0],self.z1_dim,self.z2_dim]).to(x.device)
+        cp_z = ut.conditional_sample_gaussian(cp_m.to(x.device), cp_v.to(x.device))
+        kl = torch.zeros(1).to(x.device)
+        kl = alpha*ut.kl_normal(q_m.view(-1,self.z_dim).to(x.device), q_v.view(-1,self.z_dim).to(x.device), p_m.view(-1,self.z_dim).to(x.device), p_v.view(-1,self.z_dim).to(x.device))
         
         for i in range(self.z1_dim):
-            kl = kl + beta*ut.kl_normal(decode_m[:,i,:].to(device), cp_v[:,i,:].to(device),cp_m[:,i,:].to(device), cp_v[:,i,:].to(device))
+            kl = kl + beta*ut.kl_normal(decode_m[:,i,:].to(x.device), cp_v[:,i,:].to(x.device),cp_m[:,i,:].to(x.device), cp_v[:,i,:].to(x.device))
         kl = torch.mean(kl)
-        mask_kl = torch.zeros(1).to(device)
-        mask_kl2 = torch.zeros(1).to(device)
+        mask_kl = torch.zeros(1).to(x.device)
+        mask_kl2 = torch.zeros(1).to(x.device)
 
         for i in range(self.z1_dim):
-            mask_kl = mask_kl + 1*ut.kl_normal(f_z1[:,i,:].to(device), cp_v[:,i,:].to(device),cp_m[:,i,:].to(device), cp_v[:,i,:].to(device))
+            mask_kl = mask_kl + 1*ut.kl_normal(f_z1[:,i,:].to(x.device), cp_v[:,i,:].to(x.device),cp_m[:,i,:].to(x.device), cp_v[:,i,:].to(x.device))
         
         
         u_loss = torch.nn.MSELoss()
-        mask_l = torch.mean(mask_kl) + u_loss(g_u, label.float().to(device))
+        mask_l = torch.mean(mask_kl) + u_loss(g_u, label.float().to(x.device))
         nelbo = rec + kl + mask_l
 
-        return nelbo, kl, rec, decoded_bernoulli_logits.reshape(x.size()), z_given_dag
+        # Flatten z_given_dag for return (batch, z1_dim, z2_dim) → (batch, z_dim)
+        z_given_dag_flat = z_given_dag.reshape([z_given_dag.size()[0], self.z_dim])
+        return nelbo, kl, rec, decoded_bernoulli_logits.reshape(x.size()), z_given_dag_flat
 
     def loss(self, x):
         nelbo, kl, rec, _, _ = self.negative_elbo_bound(x)

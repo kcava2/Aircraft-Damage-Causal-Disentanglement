@@ -50,14 +50,14 @@ def load_checkpoint(checkpoint_path: str):
         channel = 3,
         scale   = SCALE,
         initial = False,   # do not re-initialise DAG — load from checkpoint
-    ).to(device)
+    ).to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     lvae.load_state_dict(ckpt['lvae'])
     lvae.eval()
 
     clf = MultiLabelHead(
         in_dim    = z_dim,
         n_classes = N_CONCEPTS,
-    ).to(device)
+    ).to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     clf.load_state_dict(ckpt['clf'])
     clf.eval()
 
@@ -135,12 +135,12 @@ def classify_image(
     Returns a dict with probabilities, predictions, and causal notes.
     """
     os.makedirs(output_dir, exist_ok=True)
-    transform  = get_transforms('test', 64)
+    transform  = get_transforms('test', 96)
     img_pil    = Image.open(img_path).convert('RGB')
-    img_tensor = transform(img_pil).unsqueeze(0).to(device)
+    img_tensor = transform(img_pil).unsqueeze(0).to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
 
     # Zero concept label at inference (no ground truth available)
-    u = torch.zeros(1, N_CONCEPTS, device=device)
+    u = torch.zeros(1, N_CONCEPTS, device=img_tensor.device)
 
     z_given_dag, f_z1 = encode_image(lvae, img_tensor, u, z1_dim, z2_dim)
 
@@ -225,10 +225,10 @@ def generate_counterfactuals(
     Also shows whether downstream concepts reduce — confirming causality.
     """
     os.makedirs(output_dir, exist_ok=True)
-    transform  = get_transforms('test', 64)
+    transform  = get_transforms('test', 96)
     img_pil    = Image.open(img_path).convert('RGB')
-    img_tensor = transform(img_pil).unsqueeze(0).to(device)
-    u          = torch.zeros(1, N_CONCEPTS, device=device)
+    img_tensor = transform(img_pil).unsqueeze(0).to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    u          = torch.zeros(1, N_CONCEPTS, device=img_tensor.device)
     stem       = Path(img_path).stem
 
     z_given_dag, f_z1 = encode_image(lvae, img_tensor, u, z1_dim, z2_dim)

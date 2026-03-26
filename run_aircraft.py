@@ -1,13 +1,11 @@
-# run_aircraft.py
-# Place this file in the root of trustworthyAI/research/CausalVAE/
-# i.e. at the same level as run_pendulum.py
-
 import os
 import torch
 import numpy as np
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
 
 # ── Original repo imports ────────────────────────────────────────────────────
 from codebase import utils as ut
@@ -36,13 +34,13 @@ print(f"Using device: {device}")
 # ── Config ───────────────────────────────────────────────────────────────────
 # Change data_root to wherever your Roboflow dataset is
 DATA_ROOT    = './dataset'
-IMG_SIZE     = 64
+IMG_SIZE     = 96  # Conv encoder/decoder designed for 96x96
 Z1_DIM       = N_CONCEPTS        # 5 concepts
 Z2_DIM       = 4                 # dims per concept
 Z_DIM        = Z1_DIM * Z2_DIM  # 20 total
-EPOCHS       = 10
+EPOCHS       = 50
 BATCH_SIZE   = 64
-LR           = 1e-3
+LR           = 1e-4
 CLF_WEIGHT   = 1.0
 SAVE_EVERY   = 5
 SAVE_DIR     = './checkpoints'
@@ -106,10 +104,10 @@ if __name__ == "__main__":
         channel = 3,         # RGB
         scale   = SCALE,     # (5,2) numpy array
         initial = True,
-    ).to(device)
+    ).to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
 
     # Inject domain-informed DAG prior
-    dag_init = get_dag_init().to(device)
+    dag_init = get_dag_init().to(next(lvae.parameters()).device)
     with torch.no_grad():
         lvae.dag.A.data.copy_(dag_init)
     print("DAG prior injected.")
@@ -119,7 +117,7 @@ if __name__ == "__main__":
         in_dim    = Z_DIM,
         n_classes = N_CONCEPTS,
         dropout   = 0.3,
-    ).to(device)
+    ).to(next(lvae.parameters()).device)
 
     # ── Optimiser ─────────────────────────────────────────────────────────────────
     optimizer = torch.optim.Adam(
@@ -140,6 +138,17 @@ if __name__ == "__main__":
 
     best_val_f1 = 0.0
 
+    # ── Tracking lists for plotting ───────────────────────────────────────────────
+    history = {
+        'epoch': [],
+        'train_loss': [],
+        'train_kl': [],
+        'train_rec': [],
+        'train_clf': [],
+        'val_f1': [],
+        'val_acc': [],
+    }
+
     for epoch in range(1, EPOCHS + 1):
         lvae.train()
         clf.train()
@@ -148,14 +157,16 @@ if __name__ == "__main__":
         n_batches  = 0
 
         for imgs, u in train_loader:
-            imgs = imgs.to(device)
-            u    = u.to(device)
+            imgs = imgs.to(next(lvae.parameters()).device)
+            u    = u.to(imgs.device)
 
             optimizer.zero_grad()
 
+            kl_weight = min(1.0, epoch / 25.0) * 0.1 # Gradually increase KL weight over first 25 epochs
+
             # CausalVAE forward — returns nelbo, kl, rec, recon_image, z_given_dag
             L, kl, rec, recon_img, z_given_dag = lvae.negative_elbo_bound(
-                imgs, u, sample=False
+                imgs, u, sample=False, alpha=kl_weight, beta=kl_weight
             )
 
             # DAG acyclicity penalty (same as run_pendulum.py)
@@ -190,8 +201,8 @@ if __name__ == "__main__":
 
         with torch.no_grad():
             for imgs, u in valid_loader:
-                imgs = imgs.to(device)
-                u    = u.to(device)
+                imgs = imgs.to(next(lvae.parameters()).device)
+                u    = u.to(imgs.device)
                 _, _, _, _, z_given_dag = lvae.negative_elbo_bound(imgs, u, sample=False)
                 all_logits.append(clf(z_given_dag).cpu())
                 all_targets.append(u_to_targets(u).cpu())
@@ -210,6 +221,15 @@ if __name__ == "__main__":
             f"clf={total_clf/n_batches:.4f}  |  "
             f"val_f1={val_f1:.4f}  val_acc={val_acc:.4f}"
         )
+        
+        # Track metrics for plotting
+        history['epoch'].append(epoch)
+        history['train_loss'].append(total_loss/n_batches)
+        history['train_kl'].append(total_kl/n_batches)
+        history['train_rec'].append(total_rec/n_batches)
+        history['train_clf'].append(total_clf/n_batches)
+        history['val_f1'].append(val_f1)
+        history['val_acc'].append(val_acc)
         for cls_name, m in metrics["per_class"].items():
             print(f"    {cls_name:<15} F1={m['f1']:.3f}  "
                   f"P={m['precision']:.3f}  R={m['recall']:.3f}")
@@ -218,8 +238,8 @@ if __name__ == "__main__":
         if epoch % SAVE_EVERY == 0:
             with torch.no_grad():
                 sample_imgs, sample_u = next(iter(valid_loader))
-                sample_imgs = sample_imgs[:8].to(device)
-                sample_u    = sample_u[:8].to(device)
+                sample_imgs = sample_imgs[:8].to(next(lvae.parameters()).device)
+                sample_u    = sample_u[:8].to(sample_imgs.device)
                 _, _, _, recon, _ = lvae.negative_elbo_bound(
                     sample_imgs, sample_u, sample=False
                 )
@@ -245,7 +265,6 @@ if __name__ == "__main__":
             }, os.path.join(SAVE_DIR, 'best_model.pt'))
             print(f"    ✓ Best model saved (val_f1={val_f1:.4f})")
 
-        if epoch % SAVE_EVERY == 0:
             torch.save({
                 'epoch': epoch,
                 'lvae':  lvae.state_dict(),
@@ -253,3 +272,78 @@ if __name__ == "__main__":
             }, os.path.join(SAVE_DIR, f'checkpoint_epoch{epoch:04d}.pt'))
 
     print(f"\nTraining complete. Best val F1: {best_val_f1:.4f}")
+
+    # ── Plot training history ─────────────────────────────────────────────────────
+    fig = plt.figure(figsize=(15, 10))
+    gs = GridSpec(3, 2, figure=fig, hspace=0.3, wspace=0.3)
+
+    # Loss plot
+    ax1 = fig.add_subplot(gs[0, :])
+    ax1.plot(history['epoch'], history['train_loss'], 'b-', label='Total Loss', linewidth=2)
+    ax1.set_xlabel('Epoch', fontsize=11)
+    ax1.set_ylabel('Loss', fontsize=11)
+    ax1.set_title('Training Loss', fontsize=12, fontweight='bold')
+    ax1.legend(loc='best')
+    ax1.grid(True, alpha=0.3)
+
+    # KL and Reconstruction loss
+    ax2 = fig.add_subplot(gs[1, 0])
+    ax2.plot(history['epoch'], history['train_kl'], 'g-', label='KL', linewidth=2)
+    ax2.plot(history['epoch'], history['train_rec'], 'r-', label='Reconstruction', linewidth=2)
+    ax2.set_xlabel('Epoch', fontsize=11)
+    ax2.set_ylabel('Loss', fontsize=11)
+    ax2.set_title('KL & Reconstruction Loss', fontsize=12, fontweight='bold')
+    ax2.legend(loc='best')
+    ax2.grid(True, alpha=0.3)
+
+    # Classification loss
+    ax3 = fig.add_subplot(gs[1, 1])
+    ax3.plot(history['epoch'], history['train_clf'], 'purple', label='Classification Loss', linewidth=2)
+    ax3.set_xlabel('Epoch', fontsize=11)
+    ax3.set_ylabel('Loss', fontsize=11)
+    ax3.set_title('Classification Loss', fontsize=12, fontweight='bold')
+    ax3.legend(loc='best')
+    ax3.grid(True, alpha=0.3)
+
+    # Validation F1 Score
+    ax4 = fig.add_subplot(gs[2, 0])
+    ax4.plot(history['epoch'], history['val_f1'], 'b-o', label='F1-Score (Macro)', linewidth=2, markersize=5)
+    ax4.set_xlabel('Epoch', fontsize=11)
+    ax4.set_ylabel('F1-Score', fontsize=11)
+    ax4.set_title('Validation F1-Score', fontsize=12, fontweight='bold')
+    ax4.set_ylim([0, 1.05])
+    ax4.legend(loc='best')
+    ax4.grid(True, alpha=0.3)
+
+    # Validation Accuracy
+    ax5 = fig.add_subplot(gs[2, 1])
+    ax5.plot(history['epoch'], history['val_acc'], 'g-o', label='Accuracy', linewidth=2, markersize=5)
+    ax5.set_xlabel('Epoch', fontsize=11)
+    ax5.set_ylabel('Accuracy', fontsize=11)
+    ax5.set_title('Validation Accuracy', fontsize=12, fontweight='bold')
+    ax5.set_ylim([0, 1.05])
+    ax5.legend(loc='best')
+    ax5.grid(True, alpha=0.3)
+
+    plt.savefig('./figs_aircraft/training_history.png', dpi=150, bbox_inches='tight')
+    print(f"✓ Training history plot saved to ./figs_aircraft/training_history.png")
+    plt.close()
+
+    # Save metrics to CSV for further analysis
+    import csv
+    csv_path = './figs_aircraft/training_metrics.csv'
+    with open(csv_path, 'w', newline='') as csvfile:
+        fieldnames = ['epoch', 'train_loss', 'train_kl', 'train_rec', 'train_clf', 'val_f1', 'val_acc']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for i in range(len(history['epoch'])):
+            writer.writerow({
+                'epoch': history['epoch'][i],
+                'train_loss': history['train_loss'][i],
+                'train_kl': history['train_kl'][i],
+                'train_rec': history['train_rec'][i],
+                'train_clf': history['train_clf'][i],
+                'val_f1': history['val_f1'][i],
+                'val_acc': history['val_acc'][i],
+            })
+    print(f"✓ Training metrics saved to {csv_path}")

@@ -26,7 +26,7 @@ def mask_threshold(x):
   return x
   
 def label_cov(labels):
-	cov = torch.from_numpy(np.cov(labels, rowvar = False)).to(device)
+	cov = torch.from_numpy(np.cov(labels, rowvar = False)).to(labels.device)
 	return cov
  
 def get_labelcov_prior(batchsize, cov):
@@ -38,7 +38,7 @@ def get_labelcov_prior(batchsize, cov):
   return mean, v
  
 def vector_expand(v):
-	V = torch.zeros(v.size()[0],v.size()[1],v.size()[1]).to(device)
+	V = torch.zeros(v.size()[0],v.size()[1],v.size()[1]).to(v.device)
 	for i in range(v.size()[0]):
 		for j in range(v.size()[1]):
 			V[i,j,j] = v[i,j]
@@ -52,10 +52,10 @@ def multivariate_sample(m,cov):
   z = torch.zeros(m.size())
   for i in range(z.size()[0]):
     z[i] = MultivariateNormal(m[i].cpu(), cov[i].cpu()).sample()
-  return z.to(device)
+  return z.to(m.device)
   
 def kl_multinormal_cov(qm,qv, pm, pv):
-	KL = torch.zeros(qm.size()[0]).to(device)
+	KL = torch.zeros(qm.size()[0]).to(qm.device)
 	for i in range(qm.size()[0]):
 		#print(torch.det(qv[i].cpu()))
 		KL[i] = 0.5 * (torch.log(torch.det(pv[i])) - torch.log(torch.det(qv[i])) +
@@ -66,7 +66,7 @@ def kl_multinormal_cov(qm,qv, pm, pv):
  
 def conditional_sample_gaussian(m,v):
 	#64*3*4
-	sample = torch.randn(m.size()).to(device)
+	sample = torch.randn(m.size()).to(m.device)
 	z = m + (v**0.5)*sample
 	return z
 
@@ -110,10 +110,10 @@ def sample_multivariate(cov, loc = None):
 	return latent_code
 
 def get_covariance_matrix(A):
-	# requirements: A must be torcj
+	# requirements: A must be torch
 	assert A.size()[1] == A.size()[2]
-	I = torch.zeros(A.size()).to(device)
-	i = torch.eye(n = A.size()[1]).to(device)
+	I = torch.zeros(A.size()).to(A.device)
+	i = torch.eye(n = A.size()[1]).to(A.device)
 	for j in range(A.size()[0]):
 		I[j] = torch.inverse(torch.mm(torch.t((A[j]-i)), (A[j]-i)))
 	
@@ -153,7 +153,7 @@ def sample_gaussian(m, v):
 	################################################################################
 	# End of code modification
 	################################################################################
-	sample = torch.randn(m.shape).to(device)
+	sample = torch.randn(m.shape).to(m.device)
 	
 
 	z = m + (v**0.5)*sample
@@ -486,10 +486,14 @@ def get_mnist_data(device, use_test_subset=True):
 		shuffle=True)
 
 	# Create pre-processed training and test sets
-	X_train = train_loader.dataset.train_data.to(device).reshape(-1, 784).float() / 255
-	y_train = train_loader.dataset.train_labels.to(device)
-	X_test = test_loader.dataset.test_data.to(device).reshape(-1, 784).float() / 255
-	y_test = test_loader.dataset.test_labels.to(device)
+	X_train_data = train_loader.dataset.train_data
+	y_train_data = train_loader.dataset.train_labels
+	X_test_data = test_loader.dataset.test_data
+	y_test_data = test_loader.dataset.test_labels
+	X_train = X_train_data.to(X_train_data.device).reshape(-1, 784).float() / 255
+	y_train = y_train_data.to(y_train_data.device)
+	X_test = X_test_data.to(X_test_data.device).reshape(-1, 784).float() / 255
+	y_test = y_test_data.to(y_test_data.device)
 
 	# Create supervised subset (deterministically chosen)
 	# This subset will serve dual purpose of log-likelihood evaluation and
@@ -503,8 +507,8 @@ def get_mnist_data(device, use_test_subset=True):
 		idx_choice = get_mnist_index(i, test=use_test_subset)
 		xl += [X[idx][idx_choice]]
 		yl += [y[idx][idx_choice]]
-	xl = torch.cat(xl).to(device)
-	yl = torch.cat(yl).to(device)
+	xl = torch.cat(xl).to(xl[0].device if xl else torch.device('cpu'))
+	yl = torch.cat(yl).to(yl[0].device if yl else torch.device('cpu'))
 	yl = yl.new(np.eye(10)[yl])
 	labeled_subset = (xl, yl)
 
