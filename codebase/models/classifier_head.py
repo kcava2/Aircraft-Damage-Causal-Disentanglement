@@ -89,12 +89,67 @@ class MultiClassHead(nn.Module):
 # Loss helpers
 # --------------------------------------------------------------------------- #
 
-def multilabel_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+def multilabel_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    pos_weight: torch.Tensor = None,
+) -> torch.Tensor:
     """
-    logits  : (batch, n_classes)  – raw output from MultiLabelHead
-    targets : (batch, n_classes)  – binary float, 1.0 if class present
+    logits     : (batch, n_classes)  – raw output from MultiLabelHead
+    targets    : (batch, n_classes)  – binary float, 1.0 if class present
+    pos_weight : (n_classes,) tensor – per-class weight for positive examples.
+                 Pass (neg_count / pos_count) per class to correct imbalance.
+                 E.g. if scratch has 50 positives vs 3167 negatives, its weight
+                 should be ~63.  Capped at 15 by convention to keep training
+                 stable; compute with ``compute_pos_weight`` below.
     """
-    return F.binary_cross_entropy_with_logits(logits, targets)
+    return F.binary_cross_entropy_with_logits(logits, targets, pos_weight=pos_weight)
+
+
+def compute_pos_weight(
+    dataset,
+    n_classes: int,
+    max_weight: float = 15.0,
+) -> torch.Tensor:
+    """
+    Scan ``dataset`` (an AircraftDamageDataset instance) and compute per-class
+    positive weights for ``BCEWithLogitsLoss``.
+
+    Formula: pos_weight[i] = (N - n_pos[i]) / n_pos[i], capped at max_weight.
+
+    Parameters
+    ----------
+    dataset    : Dataset whose __getitem__ returns (image, u_norm) where u_norm
+                 is the normalised concept vector in [-1, 1].
+    n_classes  : number of classes
+    max_weight : upper cap to prevent extreme classes from dominating
+
+    Returns
+    -------
+    pos_weight : FloatTensor of shape (n_classes,)
+    """
+    import numpy as np
+
+    counts = np.zeros(n_classes, dtype=np.float64)
+    N = len(dataset)
+
+    for i in range(N):
+        _, u_norm = dataset[i]
+        # u_norm in [-1, 1]; convert back to binary
+        raw = u_norm.numpy() * 0.5 + 0.5
+        counts += (raw >= 0.5).astype(np.float64)
+
+    neg_counts = N - counts
+    weights = np.where(counts > 0, neg_counts / np.maximum(counts, 1e-8), max_weight)
+    weights = np.clip(weights, 1.0, max_weight)
+
+    print("[compute_pos_weight] Per-class pos_weight (capped at {:.0f}):".format(max_weight))
+    names = getattr(dataset, 'class_names', [f'class_{i}' for i in range(n_classes)])
+    for i, w in enumerate(weights):
+        name = names[i] if i < len(names) else f'class_{i}'
+        print(f"  {name:<15} positives={int(counts[i]):4d}  weight={w:.2f}")
+
+    return torch.tensor(weights, dtype=torch.float32)
 
 
 def multiclass_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -152,5 +207,4 @@ def compute_metrics(
             "precision": precision[i].item(),
             "recall":    recall[i].item(),
         }
-
     return result
