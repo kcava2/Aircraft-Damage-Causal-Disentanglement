@@ -35,10 +35,10 @@ print(f"Using device: {device}")
 # Change data_root to wherever your Roboflow dataset is
 DATA_ROOT    = './dataset'
 IMG_SIZE     = 96  # Conv encoder/decoder designed for 96x96
-Z1_DIM       = N_CONCEPTS        # 5 concepts
+Z1_DIM       = N_CONCEPTS        # 4 concepts: crack, dent, paint_off, scratch
 Z2_DIM       = 4                 # dims per concept
-Z_DIM        = Z1_DIM * Z2_DIM  # 20 total
-EPOCHS       = 50
+Z_DIM        = Z1_DIM * Z2_DIM  # 16 total
+EPOCHS       = 10
 BATCH_SIZE   = 64
 LR           = 1e-4
 CLF_WEIGHT   = 1.0
@@ -47,6 +47,109 @@ SAVE_DIR     = './checkpoints'
 
 os.makedirs(SAVE_DIR, exist_ok=True)
 os.makedirs('./figs_aircraft', exist_ok=True)
+
+
+# ── Diagnostic functions ─────────────────────────────────────────────────────
+def print_model_architecture(model):
+    """Print information about encoder and decoder types."""
+    print("\n" + "="*60)
+    print("MODEL ARCHITECTURE DIAGNOSTICS")
+    print("="*60)
+    
+    print(f"Encoder type: {type(model.enc).__name__}")
+    print(f"Encoder input channels: {model.channel}")
+    print(f"Encoder z_dim: {model.z_dim}")
+    
+    print(f"\nDecoder type: {type(model.dec).__name__}")
+    print(f"Decoder z_dim: {model.z_dim}")
+    print(f"Decoder z1_dim (concepts): {model.z1_dim}")
+    print(f"Decoder z2_dim (dims per concept): {model.z2_dim}")
+    print(f"Decoder output channels: {model.channel}")
+    
+    # Count parameters
+    enc_params = sum(p.numel() for p in model.enc.parameters())
+    dec_params = sum(p.numel() for p in model.dec.parameters())
+    total_params = sum(p.numel() for p in model.parameters())
+    
+    print(f"\nParameter counts:")
+    print(f"  Encoder: {enc_params:,} parameters")
+    print(f"  Decoder: {dec_params:,} parameters")
+    print(f"  Total: {total_params:,} parameters")
+    
+    print("\nDecoder network structure:")
+    print(model.dec)
+    print("="*60 + "\n")
+
+
+def check_gradients(model, epoch):
+    """Check if gradients are flowing through the decoder."""
+    print(f"Epoch {epoch} - Gradient Diagnostics:")
+    
+    # Check decoder gradients
+    dec_grad_norm = 0.0
+    dec_param_count = 0
+    
+    for name, param in model.dec.named_parameters():
+        if param.grad is not None:
+            grad_norm = param.grad.data.norm(2).item()
+            dec_grad_norm += grad_norm ** 2
+            dec_param_count += 1
+            if grad_norm == 0:
+                print(f"  WARNING: Zero gradient in {name}")
+        else:
+            print(f"  WARNING: No gradient computed for {name}")
+    
+    dec_grad_norm = dec_grad_norm ** 0.5 if dec_param_count > 0 else 0.0
+    print(f"  Decoder gradient norm: {dec_grad_norm:.6f}")
+    print(f"  Decoder parameters with gradients: {dec_param_count}")
+    
+    # Check for gradient flow issues
+    if dec_grad_norm < 1e-6:
+        print("  ⚠️  WARNING: Very small decoder gradients - possible gradient flow issue!")
+    elif dec_grad_norm > 100:
+        print("  ⚠️  WARNING: Very large decoder gradients - possible exploding gradients!")
+    else:
+        print("  ✓ Decoder gradients look normal")
+    
+    return dec_grad_norm
+
+
+def log_reconstruction_quality(model, dataloader, epoch, device):
+    """Log reconstruction quality metrics."""
+    model.eval()
+    mse_losses = []
+    perceptual_losses = []
+    
+    with torch.no_grad():
+        for imgs, u in dataloader:
+            imgs = imgs.to(device)
+            u = u.to(device)
+            
+            _, _, rec_loss, recon_img, _ = model.negative_elbo_bound(imgs, u, sample=False)
+            
+            # Compute MSE between original and reconstruction
+            recon_sigmoid = torch.sigmoid(recon_img.reshape(imgs.size()))
+            mse = F.mse_loss(recon_sigmoid, (imgs + 1) / 2)  # Convert [-1,1] to [0,1]
+            mse_losses.append(mse.item())
+            
+            # Perceptual loss (already computed in the model)
+            perceptual_losses.append(rec_loss.item())
+    
+    avg_mse = np.mean(mse_losses)
+    avg_perceptual = np.mean(perceptual_losses)
+    
+    print(f"Epoch {epoch} - Reconstruction Quality:")
+    print(f"  Average MSE: {avg_mse:.6f}")
+    print(f"  Average Perceptual Loss: {avg_perceptual:.6f}")
+    
+    if epoch > 1:
+        # Check if reconstruction is improving
+        if avg_mse > 0.1:  # Arbitrary threshold
+            print("  ⚠️  WARNING: High reconstruction MSE - decoder may not be learning well")
+        else:
+            print("  ✓ Reconstruction quality looks reasonable")
+    
+    return avg_mse, avg_perceptual
 
 
 # ── Warmup scheduler (kept from original run_pendulum.py) ────────────────────
@@ -111,6 +214,9 @@ if __name__ == "__main__":
     with torch.no_grad():
         lvae.dag.A.data.copy_(dag_init)
     print("DAG prior injected.")
+
+    # ── Print model architecture ─────────────────────────────────────────────────
+    print_model_architecture(lvae)
 
     # ── Classifier head ───────────────────────────────────────────────────────────
     clf = MultiLabelHead(
@@ -234,8 +340,28 @@ if __name__ == "__main__":
             print(f"    {cls_name:<15} F1={m['f1']:.3f}  "
                   f"P={m['precision']:.3f}  R={m['recall']:.3f}")
 
-        # Save reconstruction samples every SAVE_EVERY epochs
-        if epoch % SAVE_EVERY == 0:
+        # ── Diagnostic checks ───────────────────────────────────────────────────
+        # Check gradients after backward pass
+        grad_norm = check_gradients(lvae, epoch)
+        
+        # Log reconstruction quality
+        mse_loss, perceptual_loss = log_reconstruction_quality(lvae, valid_loader, epoch, device)
+        
+        # Track additional metrics
+        if 'decoder_grad_norm' not in history:
+            history['decoder_grad_norm'] = []
+            history['val_mse'] = []
+            history['val_perceptual'] = []
+        
+        history['decoder_grad_norm'].append(grad_norm)
+        history['val_mse'].append(mse_loss)
+        history['val_perceptual'].append(perceptual_loss)
+
+        # Save reconstruction samples every SAVE_EVERY epochs, or every epoch for first 10
+        save_recon = (epoch % SAVE_EVERY == 0) or (epoch <= 10)
+        # Save reconstruction samples every SAVE_EVERY epochs, or every epoch for first 10
+        save_recon = (epoch % SAVE_EVERY == 0) or (epoch <= 10)
+        if save_recon:
             with torch.no_grad():
                 sample_imgs, sample_u = next(iter(valid_loader))
                 sample_imgs = sample_imgs[:8].to(next(lvae.parameters()).device)
@@ -274,11 +400,11 @@ if __name__ == "__main__":
     print(f"\nTraining complete. Best val F1: {best_val_f1:.4f}")
 
     # ── Plot training history ─────────────────────────────────────────────────────
-    fig = plt.figure(figsize=(15, 10))
-    gs = GridSpec(3, 2, figure=fig, hspace=0.3, wspace=0.3)
+    fig = plt.figure(figsize=(20, 15))
+    gs = GridSpec(4, 3, figure=fig, hspace=0.3, wspace=0.3)
 
     # Loss plot
-    ax1 = fig.add_subplot(gs[0, :])
+    ax1 = fig.add_subplot(gs[0, :2])
     ax1.plot(history['epoch'], history['train_loss'], 'b-', label='Total Loss', linewidth=2)
     ax1.set_xlabel('Epoch', fontsize=11)
     ax1.set_ylabel('Loss', fontsize=11)
@@ -306,7 +432,7 @@ if __name__ == "__main__":
     ax3.grid(True, alpha=0.3)
 
     # Validation F1 Score
-    ax4 = fig.add_subplot(gs[2, 0])
+    ax4 = fig.add_subplot(gs[1, 2])
     ax4.plot(history['epoch'], history['val_f1'], 'b-o', label='F1-Score (Macro)', linewidth=2, markersize=5)
     ax4.set_xlabel('Epoch', fontsize=11)
     ax4.set_ylabel('F1-Score', fontsize=11)
@@ -316,7 +442,7 @@ if __name__ == "__main__":
     ax4.grid(True, alpha=0.3)
 
     # Validation Accuracy
-    ax5 = fig.add_subplot(gs[2, 1])
+    ax5 = fig.add_subplot(gs[2, 0])
     ax5.plot(history['epoch'], history['val_acc'], 'g-o', label='Accuracy', linewidth=2, markersize=5)
     ax5.set_xlabel('Epoch', fontsize=11)
     ax5.set_ylabel('Accuracy', fontsize=11)
@@ -324,6 +450,34 @@ if __name__ == "__main__":
     ax5.set_ylim([0, 1.05])
     ax5.legend(loc='best')
     ax5.grid(True, alpha=0.3)
+
+    # Reconstruction Quality (MSE)
+    ax6 = fig.add_subplot(gs[2, 1])
+    ax6.plot(history['epoch'], history['val_mse'], 'r-o', label='MSE Loss', linewidth=2, markersize=5)
+    ax6.set_xlabel('Epoch', fontsize=11)
+    ax6.set_ylabel('MSE', fontsize=11)
+    ax6.set_title('Reconstruction MSE', fontsize=12, fontweight='bold')
+    ax6.legend(loc='best')
+    ax6.grid(True, alpha=0.3)
+
+    # Decoder Gradient Norm
+    ax7 = fig.add_subplot(gs[2, 2])
+    ax7.plot(history['epoch'], history['decoder_grad_norm'], 'orange', label='Gradient Norm', linewidth=2)
+    ax7.set_xlabel('Epoch', fontsize=11)
+    ax7.set_ylabel('Gradient Norm', fontsize=11)
+    ax7.set_title('Decoder Gradient Norm', fontsize=12, fontweight='bold')
+    ax7.legend(loc='best')
+    ax7.grid(True, alpha=0.3)
+    ax7.set_yscale('log')  # Log scale for gradient norms
+
+    # Perceptual Loss
+    ax8 = fig.add_subplot(gs[3, :])
+    ax8.plot(history['epoch'], history['val_perceptual'], 'm-', label='Perceptual Loss', linewidth=2)
+    ax8.set_xlabel('Epoch', fontsize=11)
+    ax8.set_ylabel('Perceptual Loss', fontsize=11)
+    ax8.set_title('Perceptual Reconstruction Loss', fontsize=12, fontweight='bold')
+    ax8.legend(loc='best')
+    ax8.grid(True, alpha=0.3)
 
     plt.savefig('./figs_aircraft/training_history.png', dpi=150, bbox_inches='tight')
     print(f"✓ Training history plot saved to ./figs_aircraft/training_history.png")
@@ -333,7 +487,7 @@ if __name__ == "__main__":
     import csv
     csv_path = './figs_aircraft/training_metrics.csv'
     with open(csv_path, 'w', newline='') as csvfile:
-        fieldnames = ['epoch', 'train_loss', 'train_kl', 'train_rec', 'train_clf', 'val_f1', 'val_acc']
+        fieldnames = ['epoch', 'train_loss', 'train_kl', 'train_rec', 'train_clf', 'val_f1', 'val_acc', 'val_mse', 'val_perceptual', 'decoder_grad_norm']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         for i in range(len(history['epoch'])):
@@ -345,5 +499,8 @@ if __name__ == "__main__":
                 'train_clf': history['train_clf'][i],
                 'val_f1': history['val_f1'][i],
                 'val_acc': history['val_acc'][i],
+                'val_mse': history['val_mse'][i],
+                'val_perceptual': history['val_perceptual'][i],
+                'decoder_grad_norm': history['decoder_grad_norm'][i],
             })
     print(f"✓ Training metrics saved to {csv_path}")

@@ -36,13 +36,12 @@ If you want a fully data-driven DAG (no prior), set A_INIT to all zeros.
 
 import torch
 
-# 5 x 5 adjacency matrix  (rows = children, cols = parents)
+# 4 x 4 adjacency matrix  (rows = children, cols = parents)
 A_INIT = torch.tensor([
-    [0, 1, 0, 0, 0],   # crack       <-- dent
-    [0, 0, 0, 0, 0],   # dent        (root)
-    [0, 0, 0, 0, 0],   # missing_head (root)
-    [0, 0, 0, 0, 1],   # paint_off   <-- scratch
-    [0, 1, 0, 0, 0],   # scratch     <-- dent
+    [0, 1, 0, 0],   # crack       <-- dent
+    [0, 0, 0, 0],   # dent        (root)
+    [0, 0, 0, 1],   # paint_off   <-- scratch
+    [0, 1, 0, 0],   # scratch     <-- dent
 ], dtype=torch.float32)
 
 

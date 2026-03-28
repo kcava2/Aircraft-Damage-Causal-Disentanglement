@@ -98,15 +98,23 @@ class CausalVAE(nn.Module):
 
         recon_img = torch.sigmoid(decoded_bernoulli_logits.reshape(x.size()))
         x_01      = x * 0.5 + 0.5          # convert x from [-1,1] to [0,1]
-        mse_loss  = F.mse_loss(recon_img, x_01) * 10.0  # MSE reconstruction loss, scaled up for visibility
         
-        # Perceptual loss using VGG16 features
-        with torch.no_grad():
-            x_features = self.perceptual_net(x_01.repeat(1, 3, 1, 1) if x_01.size(1) == 1 else x_01)
-            recon_features = self.perceptual_net(recon_img.repeat(1, 3, 1, 1) if recon_img.size(1) == 1 else recon_img)
-        perceptual_loss = F.mse_loss(x_features, recon_features) * 0.1  # Scale down perceptual loss
-        
-        rec = mse_loss + perceptual_loss  # Combine MSE and perceptual loss
+        # MSE captures pixel accuracy
+        mse  = F.mse_loss(recon_img, x_01)
+
+        # SSIM captures structural similarity — punishes grey blobs harder than MSE
+        def ssim_loss(pred, target):
+            mu_p    = F.avg_pool2d(pred,   3, 1, 1)
+            mu_t    = F.avg_pool2d(target, 3, 1, 1)
+            sig_p   = F.avg_pool2d(pred**2,   3, 1, 1) - mu_p**2
+            sig_t   = F.avg_pool2d(target**2, 3, 1, 1) - mu_t**2
+            sig_pt  = F.avg_pool2d(pred*target, 3, 1, 1) - mu_p*mu_t
+            C1, C2  = 0.01**2, 0.03**2
+            ssim    = ((2*mu_p*mu_t + C1)*(2*sig_pt + C2)) / \
+              ((mu_p**2 + mu_t**2 + C1)*(sig_p + sig_t + C2))
+            return 1 - ssim.mean()
+
+        rec = 200.0 * mse + 100.0 * ssim_loss(recon_img, x_01)
 
         p_m, p_v = torch.zeros(q_m.size()).to(x.device), torch.ones(q_m.size()).to(x.device)
         cp_m, cp_v = ut.condition_prior(self.scale, label, self.z2_dim)

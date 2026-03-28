@@ -36,8 +36,8 @@ from torchvision import transforms
 # --------------------------------------------------------------------------- #
 # Class index  -> human name
 # --------------------------------------------------------------------------- #
-CLASS_NAMES = ["crack", "dent", "missing_head", "paint_off", "scratch"]
-N_CONCEPTS   = len(CLASS_NAMES)   # 5
+CLASS_NAMES = ["crack", "dent", "paint_off", "scratch"]
+N_CONCEPTS   = len(CLASS_NAMES)   # 4
 
 # --------------------------------------------------------------------------- #
 # scale[i] = [mean, half_range] used to normalise concept i to [-1, 1].
@@ -46,14 +46,14 @@ N_CONCEPTS   = len(CLASS_NAMES)   # 5
 #   half_range = 0.5
 # So:  normalised = (raw - 0.5) / 0.5  --> maps 0 -> -1, 1 -> +1
 # --------------------------------------------------------------------------- #
-SCALE = np.array([[0.5, 0.5]] * N_CONCEPTS, dtype=np.float32)   # shape (5, 2)
+SCALE = np.array([[0.5, 0.5]] * N_CONCEPTS, dtype=np.float32)   # shape (4, 2)
 
 
 def parse_yolo_label(label_path: str) -> np.ndarray:
     """
     Read a YOLO .txt file and return a binary presence vector of length N_CONCEPTS.
     Each row in the file: <class_id> <cx> <cy> <w> <h>
-    We only need the class_id column.
+    We only need the class_id column. Skip class_id 2 (missing_head).
     """
     presence = np.zeros(N_CONCEPTS, dtype=np.float32)
     if not os.path.exists(label_path):
@@ -64,8 +64,12 @@ def parse_yolo_label(label_path: str) -> np.ndarray:
             if not line:
                 continue
             class_id = int(line.split()[0])
-            if 0 <= class_id < N_CONCEPTS:
+            if class_id == 2:                # skip missing_head
+                continue
+            elif class_id < 2:
                 presence[class_id] = 1.0
+            elif class_id > 2 and class_id < 5:
+                presence[class_id - 1] = 1.0  # shift down by 1
     return presence
 
 
@@ -151,13 +155,18 @@ def get_transforms(split: str = "train", img_size: int = 96):
     """
     Returns torchvision transforms appropriate for each split.
     CausalVAE with convolutional encoder/decoder uses 96x96.
+    Training augmentation is aggressive to force decoder to learn damage patterns.
     """
     if split == "train":
         return transforms.Compose([
             transforms.Resize((img_size, img_size)),
             transforms.RandomHorizontalFlip(p=0.5),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+            transforms.RandomRotation(degrees=15),
+            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2, hue=0.1),
+            transforms.RandomPerspective(distortion_scale=0.2, p=0.3),
             transforms.ToTensor(),
+            transforms.Lambda(lambda x: x + torch.randn_like(x) * 0.02),  # Gaussian noise
         ])
     else:
         return transforms.Compose([
