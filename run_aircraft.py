@@ -25,6 +25,7 @@ from codebase.models.classifier_head import (
     MultiLabelHead,
     multilabel_loss,
     compute_metrics,
+    compute_pos_weight,
 )
 
 # ── Device ───────────────────────────────────────────────────────────────────
@@ -171,12 +172,15 @@ class DeterministicWarmup(object):
 # ── Training loop ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     # ── Datasets ─────────────────────────────────────────────────────────────────
+    train_dataset = AircraftDamageDataset(
+        img_dir   = os.path.join(DATA_ROOT, 'train', 'images'),
+        label_dir = os.path.join(DATA_ROOT, 'train', 'labels'),
+        transform = get_transforms('train', IMG_SIZE),
+    )
+    train_dataset.class_names = CLASS_NAMES  # needed by compute_pos_weight
+
     train_loader = DataLoader(
-        AircraftDamageDataset(
-            img_dir   = os.path.join(DATA_ROOT, 'train', 'images'),
-            label_dir = os.path.join(DATA_ROOT, 'train', 'labels'),
-            transform = get_transforms('train', IMG_SIZE),
-        ),
+        train_dataset,
         batch_size  = BATCH_SIZE,
         shuffle     = True,
         num_workers = 0,  # Windows-safe, avoids multiprocessing spawn issues
@@ -196,6 +200,11 @@ if __name__ == "__main__":
     )
 
     print(f"Train batches: {len(train_loader)}  |  Valid batches: {len(valid_loader)}")
+
+    # ── Class-imbalance correction ────────────────────────────────────────────────
+    # paint_off and scratch are heavily under-represented; weight their positives
+    # so the model is penalised equally regardless of class frequency.
+    clf_pos_weight = compute_pos_weight(train_dataset, n_classes=N_CONCEPTS, max_weight=15.0).to(device)
 
 
     # ── Model ─────────────────────────────────────────────────────────────────────
@@ -282,7 +291,7 @@ if __name__ == "__main__":
 
             # Classification loss on top of latent z
             clf_logits = clf(z_given_dag)
-            clf_loss   = multilabel_loss(clf_logits, u_to_targets(u))
+            clf_loss   = multilabel_loss(clf_logits, u_to_targets(u), pos_weight=clf_pos_weight)
             L          = L + CLF_WEIGHT * clf_loss
 
             L.backward()
