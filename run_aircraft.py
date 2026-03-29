@@ -2,7 +2,7 @@ import os
 import torch
 import numpy as np
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision.utils import save_image
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
@@ -16,6 +16,7 @@ from codebase.utils import _h_A
 from dataset.aircraft_damage import (
     AircraftDamageDataset,
     get_transforms,
+    parse_yolo_label,
     SCALE,
     N_CONCEPTS,
     CLASS_NAMES,
@@ -39,12 +40,13 @@ IMG_SIZE     = 96  # Conv encoder/decoder designed for 96x96
 Z1_DIM       = N_CONCEPTS        # 4 concepts: crack, dent, paint_off, scratch
 Z2_DIM       = 4                 # dims per concept
 Z_DIM        = Z1_DIM * Z2_DIM  # 16 total
-EPOCHS       = 10
+EPOCHS            = 30   # Phase 1: joint VAE + classifier
+CLF_FINETUNE_EPOCHS = 15 # Phase 2: freeze VAE, fine-tune classifier on fixed latents
 BATCH_SIZE   = 64
 LR           = 1e-4
-CLF_WEIGHT   = 1.0
+CLF_WEIGHT   = 3.0
 SAVE_EVERY   = 5
-SAVE_DIR     = './checkpoints'
+SAVE_DIR     = 'checkpoints'
 
 os.makedirs(SAVE_DIR, exist_ok=True)
 os.makedirs('./figs_aircraft', exist_ok=True)
@@ -179,11 +181,33 @@ if __name__ == "__main__":
     )
     train_dataset.class_names = CLASS_NAMES  # needed by compute_pos_weight
 
+    # ── Print class distribution ──────────────────────────────────────────────
+    dist = train_dataset.class_distribution()
+    total_samples = len(train_dataset)
+    print(f"\nClass distribution (train, {total_samples} images):")
+    for cls, cnt in dist.items():
+        print(f"  {cls:<15} {cnt:5d}  ({100*cnt/total_samples:.1f}%)")
+
+    # ── WeightedRandomSampler — oversample images with rare damage types ───────
+    # Use sqrt(inv_freq) to gently boost minority classes without burying crack.
+    # Raw inv_freq over-corrects when combined with pos_weight in the loss.
+    inv_freq = {cls: (total_samples / max(dist[cls], 1)) ** 0.5 for cls in CLASS_NAMES}
+    sample_weights = []
+    for img_path in train_dataset.samples:
+        label_path = train_dataset.label_dir / (img_path.stem + ".txt")
+        pres = parse_yolo_label(str(label_path))
+        pos_weights = [inv_freq[CLASS_NAMES[i]] for i in range(N_CONCEPTS) if pres[i] > 0]
+        sample_weights.append(max(pos_weights) if pos_weights else 1.0)
+
+    sampler = WeightedRandomSampler(
+        sample_weights, num_samples=len(sample_weights), replacement=True
+    )
+
     train_loader = DataLoader(
         train_dataset,
         batch_size  = BATCH_SIZE,
-        shuffle     = True,
-        num_workers = 0,  # Windows-safe, avoids multiprocessing spawn issues
+        sampler     = sampler,
+        num_workers = 0,
         pin_memory  = False,
     )
 
@@ -234,13 +258,20 @@ if __name__ == "__main__":
         dropout   = 0.3,
     ).to(next(lvae.parameters()).device)
 
-    # ── Optimiser ─────────────────────────────────────────────────────────────────
-    optimizer = torch.optim.Adam(
-        list(lvae.parameters()) + list(clf.parameters()),
-        lr=LR, betas=(0.9, 0.999),
+    # ── Optimisers ────────────────────────────────────────────────────────────────
+    # Separate optimizers so the large reconstruction gradient (200×MSE) cannot
+    # drown out the classifier. Classifier uses 3× higher LR to keep up.
+    vae_optimizer = torch.optim.Adam(
+        lvae.parameters(), lr=LR, betas=(0.9, 0.999),
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=EPOCHS, eta_min=1e-5
+    clf_optimizer = torch.optim.Adam(
+        clf.parameters(), lr=LR * 3, betas=(0.9, 0.999),
+    )
+    vae_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        vae_optimizer, T_max=EPOCHS, eta_min=1e-5
+    )
+    clf_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        clf_optimizer, T_max=EPOCHS, eta_min=1e-5
     )
 
 
@@ -275,9 +306,13 @@ if __name__ == "__main__":
             imgs = imgs.to(next(lvae.parameters()).device)
             u    = u.to(imgs.device)
 
-            optimizer.zero_grad()
+            vae_optimizer.zero_grad()
+            clf_optimizer.zero_grad()
 
-            kl_weight = min(1.0, epoch / 25.0) * 0.1 # Gradually increase KL weight over first 25 epochs
+            # KL warmup: ramp from 0 → 0.5 over first 15 epochs.
+            # Previous value (0.1 ceiling) caused posterior collapse — KL was
+            # never strong enough to structure the latent space.
+            kl_weight = min(1.0, epoch / 15.0) * 0.5
 
             # CausalVAE forward — returns nelbo, kl, rec, recon_image, z_given_dag
             L, kl, rec, recon_img, z_given_dag = lvae.negative_elbo_bound(
@@ -289,24 +324,26 @@ if __name__ == "__main__":
             h_a = _h_A(dag_param, dag_param.size()[0])
             L   = L + 3 * h_a + 0.5 * h_a * h_a
 
-            # Classification loss on top of latent z
-            clf_logits = clf(z_given_dag)
+            # VAE backward (reconstruction + KL + DAG)
+            L.backward(retain_graph=True)
+            torch.nn.utils.clip_grad_norm_(lvae.parameters(), 1.0)
+            vae_optimizer.step()
+
+            # Classification loss — separate backward so clf gradient is clean
+            clf_logits = clf(z_given_dag.detach())   # detach: clf update doesn't affect VAE
             clf_loss   = multilabel_loss(clf_logits, u_to_targets(u), pos_weight=clf_pos_weight)
-            L          = L + CLF_WEIGHT * clf_loss
+            clf_loss.backward()
+            torch.nn.utils.clip_grad_norm_(clf.parameters(), 1.0)
+            clf_optimizer.step()
 
-            L.backward()
-            torch.nn.utils.clip_grad_norm_(
-                list(lvae.parameters()) + list(clf.parameters()), 1.0
-            )
-            optimizer.step()
-
-            total_loss += L.item()
+            total_loss += L.item() + clf_loss.item()
             total_kl   += kl.item()
             total_rec  += rec.item()
             total_clf  += clf_loss.item()
             n_batches  += 1
 
-        scheduler.step()
+        vae_scheduler.step()
+        clf_scheduler.step()
 
         # ── Validation ────────────────────────────────────────────────────────────
         lvae.eval()
@@ -406,7 +443,101 @@ if __name__ == "__main__":
                 'clf':   clf.state_dict(),
             }, os.path.join(SAVE_DIR, f'checkpoint_epoch{epoch:04d}.pt'))
 
-    print(f"\nTraining complete. Best val F1: {best_val_f1:.4f}")
+    print(f"\nPhase 1 complete. Best val F1: {best_val_f1:.4f}")
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Phase 2 — Freeze VAE, fine-tune classifier on fixed latents
+    # The VAE latent space is now stable; the classifier can converge properly
+    # without chasing a moving target.
+    # ─────────────────────────────────────────────────────────────────────────────
+    print(f"\n{'='*55}")
+    print("  Phase 2: Classifier fine-tuning on frozen VAE latents")
+    print(f"{'='*55}")
+
+    # Freeze every VAE parameter
+    for param in lvae.parameters():
+        param.requires_grad_(False)
+    lvae.eval()
+
+    clf_ft_optimizer = torch.optim.Adam(clf.parameters(), lr=LR, betas=(0.9, 0.999))
+    clf_ft_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        clf_ft_optimizer, T_max=CLF_FINETUNE_EPOCHS, eta_min=1e-6
+    )
+
+    best_ft_f1 = 0.0
+    history['ft_epoch'] = []
+    history['ft_clf']   = []
+    history['ft_val_f1'] = []
+    history['ft_val_acc'] = []
+
+    for ft_epoch in range(1, CLF_FINETUNE_EPOCHS + 1):
+        clf.train()
+        total_clf_ft = 0.0
+        n_batches_ft = 0
+
+        for imgs, u in train_loader:
+            imgs = imgs.to(device)
+            u    = u.to(device)
+
+            # Encode with frozen VAE — no gradients through VAE
+            with torch.no_grad():
+                _, _, _, _, z_given_dag = lvae.negative_elbo_bound(imgs, u, sample=False)
+
+            clf_ft_optimizer.zero_grad()
+            clf_logits = clf(z_given_dag)
+            clf_loss   = multilabel_loss(clf_logits, u_to_targets(u), pos_weight=clf_pos_weight)
+            clf_loss.backward()
+            torch.nn.utils.clip_grad_norm_(clf.parameters(), 1.0)
+            clf_ft_optimizer.step()
+
+            total_clf_ft += clf_loss.item()
+            n_batches_ft += 1
+
+        clf_ft_scheduler.step()
+
+        # Validation
+        clf.eval()
+        all_logits, all_targets = [], []
+        with torch.no_grad():
+            for imgs, u in valid_loader:
+                imgs = imgs.to(device)
+                u    = u.to(device)
+                _, _, _, _, z_given_dag = lvae.negative_elbo_bound(imgs, u, sample=False)
+                all_logits.append(clf(z_given_dag).cpu())
+                all_targets.append(u_to_targets(u).cpu())
+
+        all_logits  = torch.cat(all_logits)
+        all_targets = torch.cat(all_targets)
+        metrics     = compute_metrics(all_logits, all_targets, class_names=CLASS_NAMES)
+        ft_f1       = metrics["f1_macro"]
+        ft_acc      = metrics["exact_match_accuracy"]
+
+        print(f"  FT epoch {ft_epoch:2d}/{CLF_FINETUNE_EPOCHS}  "
+              f"clf={total_clf_ft/n_batches_ft:.4f}  |  "
+              f"val_f1={ft_f1:.4f}  val_acc={ft_acc:.4f}")
+        for cls_name, m in metrics["per_class"].items():
+            print(f"    {cls_name:<15} F1={m['f1']:.3f}  "
+                  f"P={m['precision']:.3f}  R={m['recall']:.3f}")
+
+        history['ft_epoch'].append(EPOCHS + ft_epoch)
+        history['ft_clf'].append(total_clf_ft / n_batches_ft)
+        history['ft_val_f1'].append(ft_f1)
+        history['ft_val_acc'].append(ft_acc)
+
+        if ft_f1 > best_ft_f1:
+            best_ft_f1 = ft_f1
+            torch.save({
+                'epoch':   EPOCHS + ft_epoch,
+                'lvae':    lvae.state_dict(),
+                'clf':     clf.state_dict(),
+                'val_f1':  ft_f1,
+                'val_acc': ft_acc,
+                'config':  {'z_dim': Z_DIM, 'z1_dim': Z1_DIM, 'z2_dim': Z2_DIM},
+            }, os.path.join(SAVE_DIR, 'best_model.pt'))
+            print(f"    ✓ Best model saved (val_f1={ft_f1:.4f})")
+
+    print(f"\nTraining complete. Phase 1 best F1: {best_val_f1:.4f}  |  "
+          f"Phase 2 best F1: {best_ft_f1:.4f}")
 
     # ── Plot training history ─────────────────────────────────────────────────────
     fig = plt.figure(figsize=(20, 15))
@@ -440,9 +571,11 @@ if __name__ == "__main__":
     ax3.legend(loc='best')
     ax3.grid(True, alpha=0.3)
 
-    # Validation F1 Score
+    # Validation F1 Score (both phases)
     ax4 = fig.add_subplot(gs[1, 2])
-    ax4.plot(history['epoch'], history['val_f1'], 'b-o', label='F1-Score (Macro)', linewidth=2, markersize=5)
+    ax4.plot(history['epoch'], history['val_f1'], 'b-o', label='F1 Phase 1', linewidth=2, markersize=5)
+    ax4.plot(history['ft_epoch'], history['ft_val_f1'], 'r-o', label='F1 Phase 2 (frozen VAE)', linewidth=2, markersize=5)
+    ax4.axvline(x=EPOCHS, color='gray', linestyle='--', alpha=0.5, label='Phase boundary')
     ax4.set_xlabel('Epoch', fontsize=11)
     ax4.set_ylabel('F1-Score', fontsize=11)
     ax4.set_title('Validation F1-Score', fontsize=12, fontweight='bold')
@@ -450,9 +583,11 @@ if __name__ == "__main__":
     ax4.legend(loc='best')
     ax4.grid(True, alpha=0.3)
 
-    # Validation Accuracy
+    # Validation Accuracy (both phases)
     ax5 = fig.add_subplot(gs[2, 0])
-    ax5.plot(history['epoch'], history['val_acc'], 'g-o', label='Accuracy', linewidth=2, markersize=5)
+    ax5.plot(history['epoch'], history['val_acc'], 'g-o', label='Acc Phase 1', linewidth=2, markersize=5)
+    ax5.plot(history['ft_epoch'], history['ft_val_acc'], 'm-o', label='Acc Phase 2 (frozen VAE)', linewidth=2, markersize=5)
+    ax5.axvline(x=EPOCHS, color='gray', linestyle='--', alpha=0.5, label='Phase boundary')
     ax5.set_xlabel('Epoch', fontsize=11)
     ax5.set_ylabel('Accuracy', fontsize=11)
     ax5.set_title('Validation Accuracy', fontsize=12, fontweight='bold')

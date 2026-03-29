@@ -1,0 +1,75 @@
+{
+  "image": "C:\\Users\\kaitl\\OneDrive\\Documentos\\Aircraft-Damage-Causal-Disentanglement\\dataset\\test\\images\\1_jpg.rf.ffcd90da8b1551b996b4eb6df919ad89.jpg",
+  "damage_found": [
+    "crack",
+    "dent"
+  ],
+  "probabilities": {
+    "crack": 0.5733,
+    "dent": 0.5126,
+    "paint_off": 0.4193,
+    "scratch": 0.2086
+  },
+  "predictions": {
+    "crack": 1,
+    "dent": 1,
+    "paint_off": 0,
+    "scratch": 0
+  },
+  "causal_notes": [
+    "Crack downstream of dent (edge weight 0.978)"
+  ],
+  "counterfactuals": [
+    {
+      "concept_removed": "crack",
+      "prob_changes": {
+        "crack": 0.076,
+        "paint_off": 0.058,
+        "scratch": -0.107
+      }
+    },
+    {
+      "concept_removed": "dent",
+      "prob_changes": {
+        "crack": 0.059,
+        "dent": 0.07,
+        "paint_off": -0.143,
+        "scratch": -0.194
+      }
+    },
+    {
+      "concept_removed": "paint_off",
+      "prob_changes": {
+        "crack": 0.375,
+        "dent": 0.116,
+        "paint_off": -0.419,
+        "scratch": -0.209
+      }
+    },
+    {
+      "concept_removed": "scratch",
+      "prob_changes": {
+        "crack": 0.401,
+        "dent": 0.443,
+        "paint_off": -0.419,
+        "scratch": -0.209
+      }
+    }
+  ],
+  "dag_weights": {
+    "crack_to_crack": -0.0111,
+    "crack_to_dent": 0.9776,
+    "crack_to_paint_off": -0.0194,
+    "crack_to_scratch": -0.0132,
+    "dent_to_crack": -0.0278,
+    "dent_to_dent": -0.0243,
+    "dent_to_paint_off": -0.0239,
+    "dent_to_scratch": -0.0224,
+    "paint_off_to_crack": -0.0195,
+    "paint_off_to_dent": -0.022,
+    "paint_off_to_paint_off": -0.0165,
+    "paint_off_to_scratch": 0.9779,
+    "scratch_to_dent": 0.9908,
+    "scratch_to_scratch": -0.0139
+  }
+}
